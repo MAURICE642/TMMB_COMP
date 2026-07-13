@@ -645,6 +645,17 @@ textarea.form-control{resize:vertical;min-height:80px;}
     <div class="setup-label">Clé API Firebase</div>
     <input class="setup-input" id="cfg-apiKey" placeholder="AIzaSy...">
 
+    <div style="margin:14px 0 4px;padding:10px 12px;background:rgba(108,143,255,0.08);border:1px solid rgba(108,143,255,0.2);border-radius:8px;font-size:11px;color:var(--muted);">
+      🔑 Un compte Firebase avec le rôle <strong>comptable</strong> doit avoir été créé au préalable
+      depuis le logiciel commercial (menu Comptes → Nouvel utilisateur → rôle « Comptable »).
+      Cette app se connecte à Firestore avec ce compte, pas en mode anonyme, pour respecter
+      les règles de sécurité déjà en place.
+    </div>
+    <div class="setup-label">Email du compte Firebase (rôle comptable)</div>
+    <input class="setup-input" id="cfg-fbEmail" type="email" placeholder="comptabilite@triomphant.com">
+    <div class="setup-label">Mot de passe du compte Firebase</div>
+    <input class="setup-input" id="cfg-fbPassword" type="password" placeholder="••••••••">
+
     <div class="setup-grid">
       <div>
         <div class="setup-label">Auth Domain</div>
@@ -1861,8 +1872,9 @@ window.addEventListener('DOMContentLoaded', ()=>{
 ═══════════════════════════════════════════════════ -->
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import { getFirestore, collection, getDocs, addDoc, doc, updateDoc, deleteDoc, onSnapshot, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
-import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+import { getFirestore, collection, getDocs, addDoc, doc, getDoc, setDoc, updateDoc, deleteDoc, onSnapshot, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+import { getAuth, signInWithEmailAndPassword, signOut as fbSignOut } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+window._fbSignOut = fbSignOut;
 
 /* ═══════════════════════════════════════════════════
    STATE
@@ -1905,6 +1917,12 @@ function notify(msg, type='ok'){
 
 function saveChargesLocal(){
   localStorage.setItem('triomphant_compta_charges', JSON.stringify(CHARGES));
+  // Sync vers Firestore (best-effort, non bloquant) pour partager les charges
+  // entre tous les appareils connectés à la même base.
+  if(db_fs){
+    setDoc(doc(db_fs,'charges','data'), {items:CHARGES, updatedAt:serverTimestamp()})
+      .catch(e=>console.warn('Sync Firestore (charges) échouée :', e.message));
+  }
 }
 function loadChargesLocal(){
   try { CHARGES = JSON.parse(localStorage.getItem('triomphant_compta_charges')||'[]'); }
@@ -1956,7 +1974,9 @@ window.connectFirebase = async function(){
     projectId: document.getElementById('cfg-projectId').value.trim(),
     storageBucket: document.getElementById('cfg-storageBucket').value.trim(),
     messagingSenderId: document.getElementById('cfg-messagingSenderId').value.trim(),
-    appId: document.getElementById('cfg-appId').value.trim()
+    appId: document.getElementById('cfg-appId').value.trim(),
+    fbEmail: document.getElementById('cfg-fbEmail').value.trim(),
+    fbPassword: document.getElementById('cfg-fbPassword').value
   };
   if(!cfg.apiKey||!cfg.projectId){
     const err = document.getElementById('setup-err');
@@ -1964,6 +1984,14 @@ window.connectFirebase = async function(){
     err.textContent='⚠️ API Key et Project ID sont obligatoires.';
     return;
   }
+  if(!cfg.fbEmail||!cfg.fbPassword){
+    const err = document.getElementById('setup-err');
+    err.style.display='block';
+    err.textContent='⚠️ Le compte Firebase (rôle comptable) est obligatoire — l\'app principale bloque les connexions anonymes.';
+    return;
+  }
+  // ⚠️ Stocké tel quel en local, comme le reste de la config Firebase.
+  // Ce compte doit avoir des droits limités (rôle 'comptable'), jamais un compte admin.
   localStorage.setItem('triomphant_compta_fb_cfg', JSON.stringify(cfg));
   await initFB(cfg);
 };
@@ -1976,16 +2004,27 @@ async function initFB(cfg){
     const app = initializeApp(cfg);
     db_fs = getFirestore(app);
     auth = getAuth(app);
-    await signInAnonymously(auth);
+    // FIX : l'app principale rejette les sessions anonymes (isAuth() les exclut).
+    // On se connecte avec un vrai compte Firebase Auth ayant le rôle 'comptable'
+    // (ou 'admin') dans la collection 'commerciaux', comme le reste de l'app.
+    if(!cfg.fbEmail || !cfg.fbPassword){
+      throw new Error("Identifiants du compte Firebase manquants.");
+    }
+    await signInWithEmailAndPassword(auth, cfg.fbEmail, cfg.fbPassword);
     document.getElementById('load-text').textContent = 'Chargement des données TRIOMPHANT…';
     await loadTDBData();
+    await loadComptaData();
     startApp();
   } catch(e){
     document.getElementById('loading-screen').classList.add('hidden');
     document.getElementById('setup-screen').classList.remove('hidden');
     const err = document.getElementById('setup-err');
     err.style.display='block';
-    err.textContent='❌ '+e.message;
+    if(e.code === 'auth/invalid-credential' || e.code === 'auth/wrong-password' || e.code === 'auth/user-not-found'){
+      err.textContent = '❌ Email ou mot de passe Firebase incorrect, ou compte inexistant. Créez-le depuis le logiciel commercial (rôle Comptable).';
+    } else {
+      err.textContent = '❌ '+e.message;
+    }
   }
 }
 
@@ -2010,6 +2049,7 @@ window.syncNow = async function(){
   if(!db_fs){ notify('Non connecté à Firebase','err'); return; }
   notify('Synchronisation en cours…');
   await loadTDBData();
+  await loadComptaData();
   setSyncStatus(true);
   populateYearSelects();
   renderPg(curPg);
@@ -2793,6 +2833,10 @@ function loadSalairesLocal(){
 }
 function saveSalairesLocal(){
   localStorage.setItem('triomphant_salaires', JSON.stringify(SAL_DATA));
+  if(db_fs){
+    setDoc(doc(db_fs,'salaires','data'), {data:SAL_DATA, updatedAt:serverTimestamp()})
+      .catch(e=>console.warn('Sync Firestore (salaires) échouée :', e.message));
+  }
 }
 
 function getSalKey(){
@@ -3573,8 +3617,13 @@ window.renderComptes = function(){
 
 
 function startApp(){
-  loadChargesLocal();
-  loadSalairesLocal();
+  // En mode démo (pas de Firebase), on charge depuis le cache local.
+  // En mode connecté, CHARGES/SAL_DATA ont déjà été chargées depuis
+  // Firestore par loadComptaData() — ne pas les écraser ici.
+  if(!db_fs){
+    loadChargesLocal();
+    loadSalairesLocal();
+  }
   populateYearSelects();
   document.getElementById('dash-month').value = '';
   document.getElementById('ch-month').value = CUR_MONTH;
@@ -3638,7 +3687,35 @@ function genPieceNum(){
 //  2. VERROUILLAGE DE PÉRIODE
 // ═══════════════════════════════════════════════════
 function getLockedPeriods(){ try{ return JSON.parse(localStorage.getItem('triomphant_locked_periods')||'[]'); }catch(e){return[];} }
-function saveLockedPeriods(arr){ localStorage.setItem('triomphant_locked_periods', JSON.stringify(arr)); }
+function saveLockedPeriods(arr){
+  localStorage.setItem('triomphant_locked_periods', JSON.stringify(arr));
+  if(db_fs){
+    setDoc(doc(db_fs,'periodesVerrouillees','data'), {items:arr, updatedAt:serverTimestamp()})
+      .catch(e=>console.warn('Sync Firestore (périodes verrouillées) échouée :', e.message));
+  }
+}
+
+/* Charge CHARGES / SAL_DATA / périodes verrouillées depuis Firestore
+   (avec repli automatique sur le cache localStorage hors-ligne). */
+async function loadComptaData(){
+  try {
+    const chSnap = await getDoc(doc(db_fs,'charges','data'));
+    CHARGES = chSnap.exists() ? (chSnap.data().items||[]) : [];
+    localStorage.setItem('triomphant_compta_charges', JSON.stringify(CHARGES));
+  } catch(e){ console.warn('Lecture Firestore (charges) échouée, repli local :', e.message); loadChargesLocal(); }
+
+  try {
+    const salSnap = await getDoc(doc(db_fs,'salaires','data'));
+    SAL_DATA = salSnap.exists() ? (salSnap.data().data||{}) : {};
+    localStorage.setItem('triomphant_salaires', JSON.stringify(SAL_DATA));
+  } catch(e){ console.warn('Lecture Firestore (salaires) échouée, repli local :', e.message); loadSalairesLocal(); }
+
+  try {
+    const lockSnap = await getDoc(doc(db_fs,'periodesVerrouillees','data'));
+    const items = lockSnap.exists() ? (lockSnap.data().items||[]) : [];
+    localStorage.setItem('triomphant_locked_periods', JSON.stringify(items));
+  } catch(e){ console.warn('Lecture Firestore (périodes verrouillées) échouée, repli local :', e.message); }
+}
 function isPeriodeLocked(period){ return getLockedPeriods().includes(period); }
 
 window.checkPeriodeLock = function(){
