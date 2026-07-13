@@ -1871,7 +1871,7 @@ window.addEventListener('DOMContentLoaded', ()=>{
      FIREBASE SDK
 ═══════════════════════════════════════════════════ -->
 <script type="module">
-import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { initializeApp, getApps, getApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
 import { getFirestore, collection, getDocs, addDoc, doc, getDoc, setDoc, updateDoc, deleteDoc, onSnapshot, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 import { getAuth, signInWithEmailAndPassword, signOut as fbSignOut } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 window._fbSignOut = fbSignOut;
@@ -1996,12 +1996,18 @@ window.connectFirebase = async function(){
   await initFB(cfg);
 };
 
+let _fbInitInProgress = false;
 async function initFB(cfg){
+  if(_fbInitInProgress) return; // évite un double-clic / double auto-connexion
+  _fbInitInProgress = true;
   document.getElementById('setup-screen').classList.add('hidden');
   document.getElementById('loading-screen').classList.remove('hidden');
   document.getElementById('load-text').textContent = 'Connexion à Firebase…';
   try {
-    const app = initializeApp(cfg);
+    // FIX app/duplicate-app : si l'app par défaut existe déjà (auto-connexion
+    // au chargement de la page, ou reconnexion manuelle), on la réutilise
+    // au lieu d'essayer d'en recréer une avec initializeApp().
+    const app = getApps().length ? getApp() : initializeApp(cfg);
     db_fs = getFirestore(app);
     auth = getAuth(app);
     // FIX : l'app principale rejette les sessions anonymes (isAuth() les exclut).
@@ -2025,6 +2031,8 @@ async function initFB(cfg){
     } else {
       err.textContent = '❌ '+e.message;
     }
+  } finally {
+    _fbInitInProgress = false;
   }
 }
 
