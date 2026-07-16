@@ -597,10 +597,6 @@ textarea.form-control{resize:vertical;min-height:80px;}
       <div class="auth-success" id="reg-ok"></div>
     </div>
 
-    <div class="auth-divider">ou continuer sans compte</div>
-    <div style="text-align:center;">
-      <a href="#" onclick="goToFirebaseSetup()" style="color:var(--accent);font-size:12px;text-decoration:none;">→ Configurer Firebase directement</a>
-    </div>
     <div style="margin-top:18px;padding:12px 14px;background:rgba(249,200,70,0.08);border:1px solid rgba(249,200,70,0.2);border-radius:8px;font-size:11px;color:var(--accent3);" id="admin-key-setup-notice">
       🔐 <strong>Premier démarrage ?</strong> <a href="#" onclick="showAdminKeySetup()" style="color:var(--accent3);">Configurez la clé administrateur</a>
     </div>
@@ -632,57 +628,6 @@ textarea.form-control{resize:vertical;min-height:80px;}
     <div class="ma">
       <button class="btn btn-ghost" onclick="document.getElementById('modal-admin-key-setup').classList.add('hidden')">Annuler</button>
       <button class="btn btn-success" onclick="saveAdminKey()">✅ Enregistrer la clé</button>
-    </div>
-  </div>
-</div>
-
-<!-- ═══════════ SETUP ═══════════ -->
-<div class="setup-overlay" id="setup-screen">
-  <div class="setup-card">
-    <div class="logo-name">TRIOMPHANT — Comptabilité</div>
-    <div class="setup-sub">Connectez-vous à la même base Firebase que le logiciel commercial pour importer toutes les données en lecture seule.</div>
-
-    <div class="setup-label">Clé API Firebase</div>
-    <input class="setup-input" id="cfg-apiKey" placeholder="AIzaSy...">
-
-    <div style="margin:14px 0 4px;padding:10px 12px;background:rgba(108,143,255,0.08);border:1px solid rgba(108,143,255,0.2);border-radius:8px;font-size:11px;color:var(--muted);">
-      🔑 Un compte Firebase avec le rôle <strong>comptable</strong> doit avoir été créé au préalable
-      depuis le logiciel commercial (menu Comptes → Nouvel utilisateur → rôle « Comptable »).
-      Cette app se connecte à Firestore avec ce compte, pas en mode anonyme, pour respecter
-      les règles de sécurité déjà en place.
-    </div>
-    <div class="setup-label">Email du compte Firebase (rôle comptable)</div>
-    <input class="setup-input" id="cfg-fbEmail" type="email" placeholder="comptabilite@triomphant.com">
-    <div class="setup-label">Mot de passe du compte Firebase</div>
-    <input class="setup-input" id="cfg-fbPassword" type="password" placeholder="••••••••">
-
-    <div class="setup-grid">
-      <div>
-        <div class="setup-label">Auth Domain</div>
-        <input class="setup-input" id="cfg-authDomain" placeholder="projet.firebaseapp.com">
-      </div>
-      <div>
-        <div class="setup-label">Project ID</div>
-        <input class="setup-input" id="cfg-projectId" placeholder="mon-projet">
-      </div>
-      <div>
-        <div class="setup-label">Storage Bucket</div>
-        <input class="setup-input" id="cfg-storageBucket" placeholder="projet.appspot.com">
-      </div>
-      <div>
-        <div class="setup-label">Sender ID</div>
-        <input class="setup-input" id="cfg-messagingSenderId" placeholder="123456789">
-      </div>
-    </div>
-    <div class="setup-label">App ID</div>
-    <input class="setup-input" id="cfg-appId" placeholder="1:123:web:abc...">
-
-    <button class="btn-connect" onclick="connectFirebase()">🔌 Connecter et synchroniser</button>
-    <div class="setup-err" id="setup-err"></div>
-    <div class="setup-note">
-      Utilisez la même configuration que TRIOMPHANT MMB.<br>
-      Ce logiciel accède aux données en <strong>lecture seule</strong>.<br>
-      <a href="#" onclick="useDemoMode()">→ Démo sans Firebase</a>
     </div>
   </div>
 </div>
@@ -1637,27 +1582,15 @@ async function doLogin(){
   document.getElementById('auth-screen').classList.add('hidden');
   applyUserSession(safeUser);
 
-  /* Si la config Firebase est déjà enregistrée, reconnecter directement */
-  const savedCfg = localStorage.getItem('triomphant_compta_fb_cfg');
-  if(savedCfg){
-    try{
-      const cfg = JSON.parse(savedCfg);
-      if(cfg.apiKey && cfg.projectId){
-        ['apiKey','authDomain','projectId','storageBucket','messagingSenderId','appId'].forEach(k=>{
-          const el = document.getElementById('cfg-'+k);
-          if(el) el.value = cfg[k]||'';
-        });
-        if(typeof window._initFB === 'function'){
-          window._initFB(cfg);
-        } else {
-          window._pendingFBCfg = cfg;
-          document.getElementById('setup-screen').classList.remove('hidden');
-        }
-        return;
-      }
-    }catch(e){}
+  /* Connexion Firebase automatique : config intégrée à l'app, on utilise
+     directement l'email/mot de passe saisis sur cet écran (pas de config manuelle). */
+  const cfg = { ...FIREBASE_CONFIG, fbEmail: email, fbPassword: pwd };
+  localStorage.setItem('triomphant_compta_fb_cfg', JSON.stringify(cfg));
+  if(typeof window._initFB === 'function'){
+    window._initFB(cfg);
+  } else {
+    window._pendingFBCfg = cfg;
   }
-  document.getElementById('setup-screen').classList.remove('hidden');
 }
 
 /* ─── Déconnexion ─── */
@@ -1665,12 +1598,6 @@ function doLogout(){
   if(!confirm('Se déconnecter ?')) return;
   setCurrentUser(null);
   location.reload();
-}
-
-/* ─── Accès Firebase sans compte ─── */
-function goToFirebaseSetup(){
-  document.getElementById('auth-screen').classList.add('hidden');
-  document.getElementById('setup-screen').classList.remove('hidden');
 }
 
 /* ─── Appliquer la session ─── */
@@ -1818,52 +1745,40 @@ async function saveAdminKey(){
   setTimeout(()=>{ document.getElementById('modal-admin-key-setup').classList.add('hidden'); }, 2000);
 }
 
-/* ─── Init au chargement ─── */
+/* ─── Init au chargement ───
+   La configuration Firebase est intégrée à l'application (FIREBASE_CONFIG,
+   voir plus bas) : il n'y a plus d'écran de configuration à remplir.
+   On affiche directement l'écran de connexion (email / mot de passe). */
 window.addEventListener('DOMContentLoaded', ()=>{
   refreshAdminKeyNotice();
   const user = getCurrentUser();
   const savedCfg = localStorage.getItem('triomphant_compta_fb_cfg');
 
   if(user){
-    // Déjà connecté : masquer l'écran auth
+    // Déjà connecté : masquer l'écran auth et tenter la reconnexion Firebase silencieuse
     document.getElementById('auth-screen').classList.add('hidden');
     applyUserSession(user);
 
     if(savedCfg){
       try{
         const cfg = JSON.parse(savedCfg);
-        if(cfg.apiKey && cfg.projectId){
-          // Pré-remplir les champs setup
-          ['apiKey','authDomain','projectId','storageBucket','messagingSenderId','appId'].forEach(k=>{
-            const el = document.getElementById('cfg-'+k);
-            if(el) el.value = cfg[k]||'';
-          });
-          // Tenter reconnexion automatique
+        if(cfg.fbEmail && cfg.fbPassword){
           if(typeof window._initFB === 'function'){
             window._initFB(cfg);
           } else {
             window._pendingFBCfg = cfg;
-            document.getElementById('setup-screen').classList.remove('hidden');
           }
           return;
         }
       }catch(e){}
     }
-    // Firebase non configuré, afficher setup
-    document.getElementById('setup-screen').classList.remove('hidden');
+    // Pas d'identifiants Firebase enregistrés : retour à l'écran de connexion
+    setCurrentUser(null);
+    document.getElementById('auth-screen').classList.remove('hidden');
     return;
   }
 
-  // Non connecté : pré-remplir config Firebase si disponible
-  if(savedCfg){
-    try{
-      const cfg = JSON.parse(savedCfg);
-      ['apiKey','authDomain','projectId','storageBucket','messagingSenderId','appId'].forEach(k=>{
-        const el = document.getElementById('cfg-'+k);
-        if(el) el.value = cfg[k]||'';
-      });
-    }catch(e){}
-  }
+  // Non connecté : on reste sur l'écran de connexion (auth-screen), affiché par défaut.
 });
 </script>
 
@@ -1965,56 +1880,37 @@ const CAT_COLORS = {
 function catColor(cat){ return CAT_COLORS[cat]||'#6b7499'; }
 
 /* ═══════════════════════════════════════════════════
-   FIREBASE CONNEXION
+   FIREBASE — CONFIG INTÉGRÉE (plus d'écran à remplir manuellement)
 ═══════════════════════════════════════════════════ */
-window.connectFirebase = async function(){
-  const cfg = {
-    apiKey: document.getElementById('cfg-apiKey').value.trim(),
-    authDomain: document.getElementById('cfg-authDomain').value.trim(),
-    projectId: document.getElementById('cfg-projectId').value.trim(),
-    storageBucket: document.getElementById('cfg-storageBucket').value.trim(),
-    messagingSenderId: document.getElementById('cfg-messagingSenderId').value.trim(),
-    appId: document.getElementById('cfg-appId').value.trim(),
-    fbEmail: document.getElementById('cfg-fbEmail').value.trim(),
-    fbPassword: document.getElementById('cfg-fbPassword').value
-  };
-  if(!cfg.apiKey||!cfg.projectId){
-    const err = document.getElementById('setup-err');
-    err.style.display='block';
-    err.textContent='⚠️ API Key et Project ID sont obligatoires.';
-    return;
-  }
-  if(!cfg.fbEmail||!cfg.fbPassword){
-    const err = document.getElementById('setup-err');
-    err.style.display='block';
-    err.textContent='⚠️ Le compte Firebase (rôle comptable) est obligatoire — l\'app principale bloque les connexions anonymes.';
-    return;
-  }
-  // ⚠️ Stocké tel quel en local, comme le reste de la config Firebase.
-  // Ce compte doit avoir des droits limités (rôle 'comptable'), jamais un compte admin.
-  localStorage.setItem('triomphant_compta_fb_cfg', JSON.stringify(cfg));
-  await initFB(cfg);
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyATa_tOvEbGROCIZ9xZgkAsr_--d2vYIjc",
+  authDomain: "triomphant-v2.firebaseapp.com",
+  projectId: "triomphant-v2",
+  storageBucket: "triomphant-v2.firebasestorage.app",
+  messagingSenderId: "908578874554",
+  appId: "1:908578874554:web:5c008fba39204ce6c24e83",
+  measurementId: "G-STQHJF83X2"
 };
 
 let _fbInitInProgress = false;
 async function initFB(cfg){
   if(_fbInitInProgress) return; // évite un double-clic / double auto-connexion
   _fbInitInProgress = true;
-  document.getElementById('setup-screen').classList.add('hidden');
+  document.getElementById('auth-screen').classList.add('hidden');
   document.getElementById('loading-screen').classList.remove('hidden');
   document.getElementById('load-text').textContent = 'Connexion à Firebase…';
   try {
     // FIX app/duplicate-app : si l'app par défaut existe déjà (auto-connexion
     // au chargement de la page, ou reconnexion manuelle), on la réutilise
     // au lieu d'essayer d'en recréer une avec initializeApp().
-    const app = getApps().length ? getApp() : initializeApp(cfg);
+    const app = getApps().length ? getApp() : initializeApp(FIREBASE_CONFIG);
     db_fs = getFirestore(app);
     auth = getAuth(app);
     // FIX : l'app principale rejette les sessions anonymes (isAuth() les exclut).
-    // On se connecte avec un vrai compte Firebase Auth ayant le rôle 'comptable'
-    // (ou 'admin') dans la collection 'commerciaux', comme le reste de l'app.
+    // On se connecte avec les identifiants saisis sur l'écran de connexion,
+    // qui doivent correspondre à un compte Firebase Auth (rôle 'comptable' ou 'admin').
     if(!cfg.fbEmail || !cfg.fbPassword){
-      throw new Error("Identifiants du compte Firebase manquants.");
+      throw new Error("Identifiants de connexion manquants.");
     }
     await signInWithEmailAndPassword(auth, cfg.fbEmail, cfg.fbPassword);
     document.getElementById('load-text').textContent = 'Chargement des données TRIOMPHANT…';
@@ -2023,11 +1919,13 @@ async function initFB(cfg){
     startApp();
   } catch(e){
     document.getElementById('loading-screen').classList.add('hidden');
-    document.getElementById('setup-screen').classList.remove('hidden');
-    const err = document.getElementById('setup-err');
+    setCurrentUser(null);
+    localStorage.removeItem('triomphant_compta_fb_cfg');
+    document.getElementById('auth-screen').classList.remove('hidden');
+    const err = document.getElementById('login-err');
     err.style.display='block';
     if(e.code === 'auth/invalid-credential' || e.code === 'auth/wrong-password' || e.code === 'auth/user-not-found'){
-      err.textContent = '❌ Email ou mot de passe Firebase incorrect, ou compte inexistant. Créez-le depuis le logiciel commercial (rôle Comptable).';
+      err.textContent = '❌ Email ou mot de passe incorrect, ou compte inexistant.';
     } else {
       err.textContent = '❌ '+e.message;
     }
@@ -2080,7 +1978,7 @@ function setSyncStatus(ok){
    DEMO MODE
 ═══════════════════════════════════════════════════ */
 window.useDemoMode = function(){
-  document.getElementById('setup-screen').classList.add('hidden');
+  document.getElementById('auth-screen').classList.add('hidden');
   document.getElementById('loading-screen').classList.remove('hidden');
   injectDemoData();
   setTimeout(()=>{
