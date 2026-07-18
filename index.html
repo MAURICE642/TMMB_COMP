@@ -334,9 +334,17 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--bg);colo
   display:flex;align-items:center;justify-content:space-between;
   padding:0 24px;height:54px;background:rgba(7,9,15,0.95);
   border-bottom:1px solid #1a2440;flex-shrink:0;
+  gap:12px;
 }
 .topbar-title{font-family:'Syne',sans-serif;font-weight:700;font-size:16px;color:var(--text);}
 .topbar-right{display:flex;align-items:center;gap:12px;}
+.mobile-menu-btn{
+  display:none;align-items:center;justify-content:center;
+  width:34px;height:34px;flex-shrink:0;border-radius:8px;border:1px solid var(--border);
+  background:var(--surface);color:var(--text);cursor:pointer;
+}
+.mobile-menu-btn svg{width:18px;height:18px;}
+#sidebar-backdrop{display:none;}
 .tag{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600;border:1px solid;}
 .tag-green{background:rgba(34,197,94,0.12);color:var(--green);border-color:rgba(34,197,94,0.25);}
 .tag-blue{background:rgba(108,143,255,0.12);color:var(--accent);border-color:rgba(108,143,255,0.25);}
@@ -550,6 +558,69 @@ textarea.form-control{resize:vertical;min-height:80px;}
 .btn-sal-del:hover{background:rgba(239,68,68,0.22);}
 .sal-summary-cards{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:20px;}
 @media(max-width:900px){.sal-summary-cards{grid-template-columns:repeat(2,1fr);}}
+
+/* ═══════════════════════════════════════════════════
+   RESPONSIVE MOBILE
+═══════════════════════════════════════════════════ */
+@media(max-width:860px){
+  html,body{overflow-x:hidden;}
+
+  .mobile-menu-btn{display:flex;}
+
+  /* Sidebar devient un tiroir plein écran */
+  #sidebar{
+    position:fixed;top:0;left:0;bottom:0;z-index:200;
+    transform:translateX(-100%);transition:transform 0.25s ease;
+    width:82vw;max-width:300px;box-shadow:8px 0 24px rgba(0,0,0,0.5);
+  }
+  #sidebar.open{transform:translateX(0);}
+  #sidebar-backdrop{
+    display:block;position:fixed;inset:0;z-index:190;
+    background:rgba(0,0,0,0);pointer-events:none;transition:background 0.25s ease;
+  }
+  #sidebar-backdrop.open{background:rgba(0,0,0,0.55);pointer-events:auto;}
+
+  #app{position:relative;}
+  #main{width:100%;}
+
+  .topbar{padding:0 12px;height:52px;}
+  .topbar-title{font-size:14px;}
+  .topbar-right{gap:6px;}
+  .topbar-right .btn-sm{padding:7px 9px;font-size:11px;}
+  .tag{display:none;}
+  .user-badge span{display:none;}
+
+  #content{padding:12px;}
+
+  /* Grilles -> 1 colonne */
+  .kpi-row.kpi-4,.kpi-row.kpi-3{grid-template-columns:repeat(2,1fr)!important;gap:10px;}
+  .g2,.g3{grid-template-columns:1fr!important;gap:12px;}
+  .form-row,.form-row-3{grid-template-columns:1fr!important;gap:10px;}
+  .sal-summary-cards{grid-template-columns:1fr 1fr!important;gap:8px;}
+
+  .kpi-card{padding:14px 14px;}
+  .kpi-val{font-size:18px;}
+  .card{padding:14px;}
+
+  .filters{gap:8px;}
+  .filters input,.filters select,.form-control{width:100%!important;font-size:13px;}
+
+  /* Tableaux : scroll horizontal sur mobile plutôt que compression illisible */
+  .tw{overflow-x:auto;-webkit-overflow-scrolling:touch;}
+  .tw table{min-width:560px;}
+  .tw thead th,.tw tbody td{padding:9px 10px;font-size:12px;}
+
+  /* Fiche de paie */
+  .fp-doc{padding:14px!important;width:100%!important;max-width:100%!important;}
+  .fp-off-table{min-width:0!important;}
+
+  button.btn{font-size:12px;padding:8px 12px;}
+}
+
+@media(max-width:420px){
+  .kpi-row.kpi-4,.kpi-row.kpi-3,.sal-summary-cards{grid-template-columns:1fr!important;}
+  .logo-name{font-size:15px;}
+}
 </style>
 </head>
 <body>
@@ -585,6 +656,8 @@ textarea.form-control{resize:vertical;min-height:80px;}
 
 <!-- ═══════════ APP ═══════════ -->
 <div id="app" class="hidden">
+
+  <div id="sidebar-backdrop" onclick="toggleMobileSidebar(false)"></div>
 
   <!-- SIDEBAR -->
   <div id="sidebar">
@@ -663,6 +736,9 @@ textarea.form-control{resize:vertical;min-height:80px;}
   <!-- MAIN -->
   <div id="main">
     <div class="topbar">
+      <button class="mobile-menu-btn no-print" id="mobile-menu-btn" onclick="toggleMobileSidebar()" aria-label="Menu">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+      </button>
       <div class="topbar-title" id="topbar-title">Vue d'ensemble</div>
       <div class="topbar-right">
         <span class="tag tag-blue" id="topbar-period-label">Exercice courant</span>
@@ -1062,6 +1138,10 @@ textarea.form-control{resize:vertical;min-height:80px;}
           <div style="display:flex;flex-direction:column;gap:4px;">
             <label>Dettes (FCFA)</label>
             <input type="number" id="fp-dettes" value="0" min="0" style="width:140px;" oninput="renderFichePaie()">
+          </div>
+          <div style="display:flex;flex-direction:column;gap:4px;">
+            <label>Caution et garantie (FCFA)</label>
+            <input type="number" id="fp-caution" value="0" min="0" style="width:140px;" oninput="renderFichePaie()">
           </div>
         </div>
 
@@ -1955,7 +2035,19 @@ window.go = function(pg){
   if(navEl)  navEl.classList.add('active');
   document.getElementById('topbar-title').textContent = PAGE_TITLES[pg]||pg;
   renderPg(pg);
+  if(window.innerWidth<=860) toggleMobileSidebar(false);
+  const contentEl = document.getElementById('content');
+  if(contentEl) contentEl.scrollTop = 0;
 };
+
+function toggleMobileSidebar(force){
+  const sb = document.getElementById('sidebar');
+  const bd = document.getElementById('sidebar-backdrop');
+  if(!sb||!bd) return;
+  const show = typeof force==='boolean' ? force : !sb.classList.contains('open');
+  sb.classList.toggle('open', show);
+  bd.classList.toggle('open', show);
+}
 
 function renderPg(pg){
   if(pg==='dashboard') renderDashboard();
@@ -3129,11 +3221,12 @@ window.renderFichePaie = function(){
   const primeHebdo     = Number(document.getElementById('fp-primehebdo')?.value||0);
   const avance         = Number(document.getElementById('fp-avance')?.value||0);
   const dettes         = Number(document.getElementById('fp-dettes')?.value||0);
+  const caution        = Number(document.getElementById('fp-caution')?.value||0);
   const commission     = collecte * taux;
   const brutTotal      = salBase + commission + primeMotivation + primeHebdo + prime;
   const cotCNSS        = brutTotal * cnss;
   const cotITS         = brutTotal * its;
-  const totalRetenues  = cotCNSS + cotITS + avance + dettes;
+  const totalRetenues  = cotCNSS + cotITS + avance + dettes + caution;
   const netAPayer      = brutTotal - totalRetenues;
 
   // Période en lettres
@@ -3223,6 +3316,10 @@ window.renderFichePaie = function(){
         <tr>
           <td>Dettes</td>
           <td class="r">${dettes>0?Math.round(dettes).toLocaleString('fr-FR'):'<span class="fp-dash">---</span>'}</td>
+        </tr>
+        <tr>
+          <td>Caution et garantie</td>
+          <td class="r">${caution>0?Math.round(caution).toLocaleString('fr-FR'):'<span class="fp-dash">---</span>'}</td>
         </tr>
         <tr>
           <td>Épargne pour achat</td>
