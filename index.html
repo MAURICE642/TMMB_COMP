@@ -1504,7 +1504,7 @@ const CUR_MONTH = TODAY.slice(0,7);
 // Données lues depuis TRIOMPHANT (lecture seule)
 let TDB = {
   agences:[], commerciaux:[], clients:[], paiements:[],
-  articles:[], stockMvts:[], livraisons:[], adhesionPays:[], mises:[]
+  articles:[], stockMvts:[], livraisons:[], adhesionPays:[], mises:[], depenses:[]
 };
 
 // Données propres à la comptabilité (lecture/écriture)
@@ -1927,7 +1927,7 @@ window.deleteAccount = async function(id){
 };
 
 async function loadTDBData(){
-  const cols = ['agences','commerciaux','clients','paiements','articles','stockMvts','livraisons','adhesionPays','mises'];
+  const cols = ['agences','commerciaux','clients','paiements','articles','stockMvts','livraisons','adhesionPays','mises','depenses'];
   for(const col of cols){
     const snap = await getDocs(collection(db_fs, col));
     TDB[col] = snap.docs.map(d=>({...d.data(),_id:d.id}));
@@ -3233,10 +3233,14 @@ window.renderFichePaie = function(){
   const manquant       = Number(document.getElementById('fp-manquant')?.value||0);
   const epargne        = Number(document.getElementById('fp-epargne')?.value||0);
   const commission     = collecte * taux;
-  // Dépenses sur le commercial = primes journalière + hebdomadaire + carburant/vidange
-  // octroyées au commercial. Ces données seront intégrées automatiquement plus tard
-  // depuis l'application externe qui les enregistre. En attendant, placeholder à 0.
-  const depensesCommercial = 0; // TODO: brancher sur les données réelles de l'app externe
+  // Dépenses sur le commercial = somme des dépenses (Entraide, Carburant, Vidange,
+  // Réparation, Transport, Communication, Autre) enregistrées pour ce commercial
+  // sur le mois/année sélectionnés, lues depuis la collection Firestore 'depenses'
+  // (partagée avec l'application de gestion des commerciaux).
+  const periodePrefix = `${year}-${month}`;
+  const depensesCommercial = (TDB.depenses||[])
+    .filter(d => d.commercialId === commId && (d.date||'').startsWith(periodePrefix))
+    .reduce((sum,d) => sum + Number(d.montant||0), 0);
   const primeRendement = commission - salBase - depensesCommercial;
   const brutTotal      = salBase + primeRendement + primeMotivation + primeHebdo + prime;
   const cotCNSS        = brutTotal * cnss;
@@ -3298,6 +3302,10 @@ window.renderFichePaie = function(){
         <tr>
           <td>Prime sur rendement</td>
           <td class="r">${Math.round(primeRendement).toLocaleString('fr-FR')}</td>
+        </tr>
+        <tr class="no-print">
+          <td style="padding-left:24px;font-size:11px;color:var(--muted);">dont dépenses déduites (carburant, vidange, entraide...)</td>
+          <td class="r" style="font-size:11px;color:var(--muted);">${depensesCommercial>0?'-'+Math.round(depensesCommercial).toLocaleString('fr-FR'):'---'}</td>
         </tr>
         <tr>
           <td>Prime de motivation</td>
@@ -3419,9 +3427,12 @@ window.exportFichePaieCSV = function(){
   const collecte = salLigne ? Number(salLigne.collecte||0) : (comm ? getCollecteCommercial(commId, year, month) : 0);
   const primeTotal = prime > 0 ? prime : (salLigne ? Number(salLigne.prime||0) : 0);
   const commission  = collecte * taux;
-  // Dépenses sur le commercial (primes journalière + hebdo + carburant/vidange) —
-  // placeholder à 0 en attendant l'intégration avec l'app externe.
-  const depensesCommercial = 0; // TODO: brancher sur les données réelles de l'app externe
+  // Dépenses sur le commercial, lues depuis Firestore (collection 'depenses'),
+  // filtrées par commercial et par mois/année sélectionnés.
+  const periodePrefix = `${year}-${month}`;
+  const depensesCommercial = (TDB.depenses||[])
+    .filter(d => d.commercialId === commId && (d.date||'').startsWith(periodePrefix))
+    .reduce((sum,d) => sum + Number(d.montant||0), 0);
   const primeRendement = commission - salBase - depensesCommercial;
   const brut        = salBase + primeRendement + primeMotivation + primeHebdo + primeTotal;
   const retCNSS     = brut * cnss;
