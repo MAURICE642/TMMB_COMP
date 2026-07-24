@@ -1109,7 +1109,7 @@ textarea.form-control{resize:vertical;min-height:80px;}
           </div>
           <div style="display:flex;flex-direction:column;gap:4px;">
             <label>CNSS (%)</label>
-            <input type="number" id="fp-cnss" value="3.6" min="0" max="50" step="0.1" style="width:80px;" oninput="renderFichePaie()">
+            <input type="number" id="fp-cnss" value="0" min="0" max="50" step="0.1" style="width:80px;" oninput="renderFichePaie()">
           </div>
           <div style="display:flex;flex-direction:column;gap:4px;">
             <label>ITS / IR (%)</label>
@@ -1121,7 +1121,7 @@ textarea.form-control{resize:vertical;min-height:80px;}
           </div>
           <div style="display:flex;flex-direction:column;gap:4px;">
             <label>Salaire de base (FCFA)</label>
-            <input type="number" id="fp-salbase" value="0" min="0" style="width:140px;" oninput="renderFichePaie()">
+            <input type="number" id="fp-salbase" value="45000" min="0" style="width:140px;" oninput="renderFichePaie()">
           </div>
           <div style="display:flex;flex-direction:column;gap:4px;">
             <label>Prime motivation (FCFA)</label>
@@ -1142,6 +1142,14 @@ textarea.form-control{resize:vertical;min-height:80px;}
           <div style="display:flex;flex-direction:column;gap:4px;">
             <label>Caution et garantie (FCFA)</label>
             <input type="number" id="fp-caution" value="0" min="0" style="width:140px;" oninput="renderFichePaie()">
+          </div>
+          <div style="display:flex;flex-direction:column;gap:4px;">
+            <label>Manquant (FCFA)</label>
+            <input type="number" id="fp-manquant" value="0" min="0" style="width:140px;" oninput="renderFichePaie()">
+          </div>
+          <div style="display:flex;flex-direction:column;gap:4px;">
+            <label>Épargne (FCFA)</label>
+            <input type="number" id="fp-epargne" value="0" min="0" style="width:140px;" oninput="renderFichePaie()">
           </div>
         </div>
 
@@ -3177,7 +3185,7 @@ window.renderFichePaie = function(){
   const month   = document.getElementById('fp-month')?.value || CUR_MONTH.slice(5,7);
   const taux    = Number(document.getElementById('fp-taux')?.value||7)/100;
   const primeEl = Number(document.getElementById('fp-prime')?.value||0);
-  const cnss    = Number(document.getElementById('fp-cnss')?.value||3.6)/100;
+  const cnss    = Number(document.getElementById('fp-cnss')?.value||0)/100;
   const its     = Number(document.getElementById('fp-its')?.value||0)/100;
   const poste   = document.getElementById('fp-poste')?.value || 'Commercial';
 
@@ -3222,11 +3230,18 @@ window.renderFichePaie = function(){
   const avance         = Number(document.getElementById('fp-avance')?.value||0);
   const dettes         = Number(document.getElementById('fp-dettes')?.value||0);
   const caution        = Number(document.getElementById('fp-caution')?.value||0);
+  const manquant       = Number(document.getElementById('fp-manquant')?.value||0);
+  const epargne        = Number(document.getElementById('fp-epargne')?.value||0);
   const commission     = collecte * taux;
-  const brutTotal      = salBase + commission + primeMotivation + primeHebdo + prime;
+  // Dépenses sur le commercial = primes journalière + hebdomadaire + carburant/vidange
+  // octroyées au commercial. Ces données seront intégrées automatiquement plus tard
+  // depuis l'application externe qui les enregistre. En attendant, placeholder à 0.
+  const depensesCommercial = 0; // TODO: brancher sur les données réelles de l'app externe
+  const primeRendement = commission - salBase - depensesCommercial;
+  const brutTotal      = salBase + primeRendement + primeMotivation + primeHebdo + prime;
   const cotCNSS        = brutTotal * cnss;
   const cotITS         = brutTotal * its;
-  const totalRetenues  = cotCNSS + cotITS + avance + dettes + caution;
+  const totalRetenues  = cotCNSS + cotITS + avance + dettes + caution + manquant + epargne;
   const netAPayer      = brutTotal - totalRetenues;
 
   // Période en lettres
@@ -3282,7 +3297,7 @@ window.renderFichePaie = function(){
         </tr>
         <tr>
           <td>Prime sur rendement</td>
-          <td class="r">${Math.round(commission).toLocaleString('fr-FR')}</td>
+          <td class="r">${Math.round(primeRendement).toLocaleString('fr-FR')}</td>
         </tr>
         <tr>
           <td>Prime de motivation</td>
@@ -3322,12 +3337,12 @@ window.renderFichePaie = function(){
           <td class="r">${caution>0?Math.round(caution).toLocaleString('fr-FR'):'<span class="fp-dash">---</span>'}</td>
         </tr>
         <tr>
-          <td>Épargne pour achat</td>
-          <td class="r"><span class="fp-dash">---</span></td>
+          <td>Épargne</td>
+          <td class="r">${epargne>0?Math.round(epargne).toLocaleString('fr-FR'):'<span class="fp-dash">---</span>'}</td>
         </tr>
         <tr>
-          <td>Manquants</td>
-          <td class="r"><span class="fp-dash">---</span></td>
+          <td>Manquant</td>
+          <td class="r">${manquant>0?Math.round(manquant).toLocaleString('fr-FR'):'<span class="fp-dash">---</span>'}</td>
         </tr>
         <tr>
           <td>Retenue CNSS ${cnss>0?'('+Number(cnss*100).toFixed(1)+'%)':''}</td>
@@ -3385,9 +3400,17 @@ window.exportFichePaieCSV = function(){
   const month   = document.getElementById('fp-month')?.value || CUR_MONTH.slice(5,7);
   const taux    = Number(document.getElementById('fp-taux')?.value||7)/100;
   const prime   = Number(document.getElementById('fp-prime')?.value||0);
-  const cnss    = Number(document.getElementById('fp-cnss')?.value||3.6)/100;
+  const cnss    = Number(document.getElementById('fp-cnss')?.value||0)/100;
   const its     = Number(document.getElementById('fp-its')?.value||0)/100;
   const poste   = document.getElementById('fp-poste')?.value || 'Commercial';
+  const salBase = Number(document.getElementById('fp-salbase')?.value||0);
+  const primeMotivation = Number(document.getElementById('fp-primemotiv')?.value||0);
+  const primeHebdo = Number(document.getElementById('fp-primehebdo')?.value||0);
+  const avance = Number(document.getElementById('fp-avance')?.value||0);
+  const dettes = Number(document.getElementById('fp-dettes')?.value||0);
+  const caution = Number(document.getElementById('fp-caution')?.value||0);
+  const manquant = Number(document.getElementById('fp-manquant')?.value||0);
+  const epargne = Number(document.getElementById('fp-epargne')?.value||0);
 
   let comm = TDB.commerciaux.find(c=>c._id===commId);
   const nomComm = comm ? (comm.nom||comm.name||commId) : commId;
@@ -3396,10 +3419,15 @@ window.exportFichePaieCSV = function(){
   const collecte = salLigne ? Number(salLigne.collecte||0) : (comm ? getCollecteCommercial(commId, year, month) : 0);
   const primeTotal = prime > 0 ? prime : (salLigne ? Number(salLigne.prime||0) : 0);
   const commission  = collecte * taux;
-  const brut        = commission + primeTotal;
+  // Dépenses sur le commercial (primes journalière + hebdo + carburant/vidange) —
+  // placeholder à 0 en attendant l'intégration avec l'app externe.
+  const depensesCommercial = 0; // TODO: brancher sur les données réelles de l'app externe
+  const primeRendement = commission - salBase - depensesCommercial;
+  const brut        = salBase + primeRendement + primeMotivation + primeHebdo + primeTotal;
   const retCNSS     = brut * cnss;
   const retITS      = brut * its;
-  const net         = brut - retCNSS - retITS;
+  const totalRetenues = retCNSS + retITS + avance + dettes + caution + manquant + epargne;
+  const net         = brut - totalRetenues;
 
   const moisNoms = ['Janvier','Février','Mars','Avril','Mai','Juin','Juillet','Août','Septembre','Octobre','Novembre','Décembre'];
   const rows = [
@@ -3410,13 +3438,21 @@ window.exportFichePaieCSV = function(){
     [],
     ['Désignation','Montant (FCFA)'],
     ['Collecte du mois', collecte],
-    [`Commission (${(taux*100).toFixed(1)}%)`, Math.round(commission)],
+    ['Salaire de base', Math.round(salBase)],
+    [`Prime sur rendement (Commission ${(taux*100).toFixed(1)}% - Salaire de base - Dépenses commercial)`, Math.round(primeRendement)],
+    ['Prime de motivation', Math.round(primeMotivation)],
+    ['Primes hebdomadaires', Math.round(primeHebdo)],
     ['Prime exceptionnelle', Math.round(primeTotal)],
     ['SALAIRE BRUT', Math.round(brut)],
     [],
     [`Cotisation CNSS (${(cnss*100).toFixed(1)}%)`, -Math.round(retCNSS)],
     [`ITS (${(its*100).toFixed(1)}%)`, -Math.round(retITS)],
-    ['TOTAL RETENUES', -Math.round(retCNSS+retITS)],
+    ['Avance sur salaire', -Math.round(avance)],
+    ['Dettes', -Math.round(dettes)],
+    ['Caution et garantie', -Math.round(caution)],
+    ['Épargne', -Math.round(epargne)],
+    ['Manquant', -Math.round(manquant)],
+    ['TOTAL RETENUES', -Math.round(totalRetenues)],
     [],
     ['NET À PAYER', Math.round(net)],
   ];
