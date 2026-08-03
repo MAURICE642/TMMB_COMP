@@ -710,6 +710,10 @@ textarea.form-control{resize:vertical;min-height:80px;}
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/><path d="M16 2l4 4-4 4"/></svg>
       Projection livraisons
     </div>
+    <div class="nav-item" id="nav-autonomie" onclick="go('autonomie')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/><circle cx="12" cy="12" r="4"/></svg>
+      Autonomie
+    </div>
 
     <div class="nav-section">Données TRIOMPHANT</div>
     <div class="nav-item" id="nav-import" onclick="go('import')">
@@ -1215,6 +1219,38 @@ textarea.form-control{resize:vertical;min-height:80px;}
           </table>
         </div>
         <div style="font-size:11px;color:var(--muted);margin-top:-10px;margin-bottom:18px;" id="proj-footer-note"></div>
+      </div>
+
+      <!-- ════════ PAGE : AUTONOMIE ════════ -->
+      <div class="page" id="page-autonomie" style="background:linear-gradient(135deg,rgba(108,143,255,0.05) 0%,transparent 60%);">
+        <div class="sec-hdr">
+          <div class="sec-title">🧭 Autonomie de l'entreprise</div>
+          <button class="btn btn-ghost btn-sm no-print" onclick="renderAutonomie()">🔄 Recalculer</button>
+        </div>
+        <div class="alert alert-info">
+          ℹ️ <strong>Méthode :</strong> Capital = Trésorerie cumulée + Valeur du stock (PA). Charges à couvrir = Charges saisies + Salaires calculés + Coût d'achat estimé des livraisons dues aux clients déjà payés. Le rythme mensuel (revenus/dépenses) est la moyenne depuis le 1er janvier de l'année en cours.
+        </div>
+
+        <!-- KPIs capital -->
+        <div class="kpi-row kpi-4" id="auto-kpi-capital"></div>
+
+        <div class="g2" style="margin-bottom:18px;">
+          <div class="card">
+            <div class="card-title">📦 1. Une fois tous les clients livrés</div>
+            <div id="auto-livraisons" style="font-size:13px;line-height:2.2;color:var(--muted);"></div>
+          </div>
+          <div class="card">
+            <div class="card-title">⏳ 2. Durée de vie de l'entreprise (autonomie)</div>
+            <div id="auto-duree" style="font-size:13px;line-height:2.2;color:var(--muted);"></div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-bottom:18px;">
+          <div class="card-title">📈 Projection du capital net dans le temps</div>
+          <canvas id="chart-autonomie" style="max-height:260px;"></canvas>
+        </div>
+
+        <div style="font-size:11px;color:var(--muted);margin-top:-10px;margin-bottom:18px;" id="auto-footer-note"></div>
       </div>
 
       <!-- ════════ PAGE : COMPTES ════════ -->
@@ -2030,7 +2066,8 @@ const PAGE_TITLES = {
   dashboard:'Vue d\'ensemble',charges:'Charges & Dépenses',bilan:'Bilan Comptable',
   resultat:'Compte de Résultat',journaux:'Journal des écritures',import:'Synchronisation',
   salaires:'Auto-Salaire Commerciaux','fiche-paie':'Fiche de Paie',projection:'Projection livraisons',
-  comptes:'Gestion des comptes',tresorerie:'Tableau de Trésorerie',periodes:'Verrouillage des périodes'
+  comptes:'Gestion des comptes',tresorerie:'Tableau de Trésorerie',periodes:'Verrouillage des périodes',
+  autonomie:'Autonomie de l\'entreprise'
 };
 
 window.go = function(pg){
@@ -2070,6 +2107,7 @@ function renderPg(pg){
   else if(pg==='comptes') renderComptes();
   else if(pg==='tresorerie') renderTresorerie();
   else if(pg==='periodes') renderPeriodes();
+  else if(pg==='autonomie') renderAutonomie();
 }
 
 /* ═══════════════════════════════════════════════════
@@ -3882,6 +3920,149 @@ window.renderTresorerie = function(){
   const phd = document.getElementById('ph-tresorerie-date');
   if(php) php.textContent = `Période : ${moisLabel}`;
   if(phd) phd.textContent = `Édité le ${new Date().toLocaleDateString('fr-FR')}`;
+};
+
+// ═══════════════════════════════════════════════════
+//  5bis. AUTONOMIE DE L'ENTREPRISE
+// ═══════════════════════════════════════════════════
+function tauxSalaireGlobal(){
+  return Number(document.getElementById('sal-taux')?.value||7)/100;
+}
+function totalSalairesTous(){
+  const taux = tauxSalaireGlobal();
+  let total = 0;
+  Object.values(SAL_DATA||{}).forEach(lignes=>{
+    (lignes||[]).forEach(l=>{ total += Number(l.collecte||0)*taux + Number(l.prime||0); });
+  });
+  return total;
+}
+function valeurStockTotal(){
+  return TDB.articles.reduce((a,art)=>a+Number(art.stock||0)*Number(art.pa||0),0);
+}
+function soldeTresorerieCumule(){
+  const entrees = TDB.paiements.reduce((a,p)=>a+Number(p.montant||0),0)
+                + TDB.livraisons.filter(l=>l.statut!=='en_attente').reduce((a,l)=>a+Number(l.montant||0),0)
+                + (TDB.adhesionPays||[]).reduce((a,x)=>a+Number(x.montant||0),0);
+  const sorties = CHARGES.reduce((a,c)=>a+Number(c.montant||0),0);
+  return entrees - sorties;
+}
+function ratioCoutMoyenArticles(){
+  const arts = TDB.articles.filter(a=>Number(a.pv||0)>0);
+  return arts.length>0
+    ? arts.reduce((s,a)=>s+(Number(a.pa||0)/Number(a.pv||1)),0)/arts.length
+    : 0.6;
+}
+function coutLivraisonsDuesTotal(){
+  // Tous les clients ayant payé un jour, sans aucune livraison "livrée", tous historiques confondus
+  const clientsIds = getClientsPayesNonLivres('','');
+  const ratioCout = ratioCoutMoyenArticles();
+  let totalPaye = 0;
+  clientsIds.forEach(cid=>{
+    totalPaye += TDB.paiements.filter(p=>p.clientId===cid).reduce((s,p)=>s+Number(p.montant||0),0);
+  });
+  return { cout: totalPaye*ratioCout, nbClients: clientsIds.length, totalPaye, ratioCout };
+}
+function rythmeMensuelMoyen(){
+  // Moyenne des flux mensuels réels depuis janvier de l'année en cours
+  const now = new Date();
+  const year = String(now.getFullYear());
+  const curMonth = now.getMonth()+1; // nb de mois écoulés (janvier compte comme 1)
+  let entreesTot=0, sortiesChargesTot=0;
+  for(let m=1;m<=curMonth;m++){
+    const key = year+'-'+String(m).padStart(2,'0');
+    entreesTot += totalLivraisons(year, String(m).padStart(2,'0')) + totalAdhesions(year, String(m).padStart(2,'0'));
+    sortiesChargesTot += totalCharges(year, String(m).padStart(2,'0'));
+  }
+  // Salaires moyens : moyenne sur les mois de l'année en cours qui ont des données, sinon moyenne globale
+  const moisAnneeAvecSalaire = Object.keys(SAL_DATA||{}).filter(k=>k.startsWith(year+'-'));
+  const taux = tauxSalaireGlobal();
+  let salairesMoy = 0;
+  if(moisAnneeAvecSalaire.length>0){
+    let sTot=0;
+    moisAnneeAvecSalaire.forEach(k=>{
+      (SAL_DATA[k]||[]).forEach(l=>{ sTot += Number(l.collecte||0)*taux + Number(l.prime||0); });
+    });
+    salairesMoy = sTot/moisAnneeAvecSalaire.length;
+  } else {
+    const allKeys = Object.keys(SAL_DATA||{});
+    salairesMoy = allKeys.length>0 ? totalSalairesTous()/allKeys.length : 0;
+  }
+  const entreesMoy = entreesTot/curMonth;
+  const sortiesMoy = (sortiesChargesTot/curMonth) + salairesMoy;
+  return { entreesMoy, sortiesMoy, fluxNetMoy: entreesMoy-sortiesMoy, curMonth, year };
+}
+
+window.renderAutonomie = function(){
+  const valStock   = valeurStockTotal();
+  const solde      = soldeTresorerieCumule();
+  const capital    = solde + valStock;
+  const liv        = coutLivraisonsDuesTotal();
+  const chargesTot = totalCharges('','');
+  const salairesTot= totalSalairesTous();
+  const rythme     = rythmeMensuelMoyen();
+
+  const capitalNetApresLivraisons = capital - liv.cout;
+
+  // KPIs capital
+  const kpi = document.getElementById('auto-kpi-capital');
+  if(kpi) kpi.innerHTML = `
+    <div class="kpi-card kc-blue"><div class="kpi-lbl">Trésorerie cumulée</div><div class="kpi-val" style="color:var(--accent);">${fmt(solde)}</div></div>
+    <div class="kpi-card kc-yellow"><div class="kpi-lbl">Valeur du stock (PA)</div><div class="kpi-val kv-yellow">${fmt(valStock)}</div></div>
+    <div class="kpi-card kc-green"><div class="kpi-lbl">Capital actuel total</div><div class="kpi-val kv-green">${fmt(capital)}</div></div>
+    <div class="kpi-card ${capitalNetApresLivraisons>=0?'kc-blue':'kc-red'}"><div class="kpi-lbl">Capital net après livraisons</div><div class="kpi-val" style="color:${capitalNetApresLivraisons>=0?'var(--accent)':'var(--red)'};">${fmt(capitalNetApresLivraisons)}</div></div>`;
+
+  // Bloc 1 : livraisons + charges à couvrir
+  const bloc1 = document.getElementById('auto-livraisons');
+  if(bloc1) bloc1.innerHTML = `
+    <div class="cf-row"><span>👥 Clients payés, non livrés</span><span>${liv.nbClients}</span></div>
+    <div class="cf-row"><span>💸 Montant total encaissé (dette)</span><span>${fmt(liv.totalPaye)}</span></div>
+    <div class="cf-row"><span>📦 Coût d'achat estimé à livrer (PA)</span><span class="cf-out">−${fmt(liv.cout)}</span></div>
+    <div class="cf-row"><span>🧾 Charges saisies (historique)</span><span class="cf-out">−${fmt(chargesTot)}</span></div>
+    <div class="cf-row"><span>👤 Salaires calculés (historique)</span><span class="cf-out">−${fmt(salairesTot)}</span></div>
+    <div class="cf-row cf-total"><span>CAPITAL NET (après coût des livraisons)</span><span class="${capitalNetApresLivraisons>=0?'cf-net-pos':'cf-net-neg'}">${fmt(capitalNetApresLivraisons)}</span></div>
+    <div style="font-size:11px;margin-top:6px;">Ratio coût moyen (PA/PV) utilisé : ${(liv.ratioCout*100).toFixed(1)}%</div>`;
+
+  // Bloc 2 : autonomie dans le temps
+  const bloc2 = document.getElementById('auto-duree');
+  let dureeHTML;
+  if(rythme.fluxNetMoy>=0){
+    dureeHTML = `
+      <div class="cf-row"><span>📈 Revenus mensuels moyens (${rythme.year})</span><span class="cf-in">${fmt(rythme.entreesMoy)}</span></div>
+      <div class="cf-row"><span>📉 Dépenses mensuelles moyennes</span><span class="cf-out">−${fmt(rythme.sortiesMoy)}</span></div>
+      <div class="cf-row cf-total"><span>FLUX NET MENSUEL</span><span class="cf-net-pos">+${fmt(rythme.fluxNetMoy)}</span></div>
+      <div class="alert alert-info" style="margin-top:10px;">✅ L'entreprise s'autofinance : les revenus mensuels moyens couvrent les dépenses. Autonomie illimitée au rythme actuel.</div>`;
+  } else {
+    const moisAutonomie = capital / Math.abs(rythme.fluxNetMoy);
+    const dateEpuis = new Date();
+    dateEpuis.setMonth(dateEpuis.getMonth()+Math.floor(moisAutonomie));
+    dureeHTML = `
+      <div class="cf-row"><span>📈 Revenus mensuels moyens (${rythme.year})</span><span class="cf-in">${fmt(rythme.entreesMoy)}</span></div>
+      <div class="cf-row"><span>📉 Dépenses mensuelles moyennes</span><span class="cf-out">−${fmt(rythme.sortiesMoy)}</span></div>
+      <div class="cf-row cf-total"><span>DÉFICIT MENSUEL MOYEN</span><span class="cf-net-neg">−${fmt(Math.abs(rythme.fluxNetMoy))}</span></div>
+      <div class="alert alert-warn" style="margin-top:10px;">⚠️ Au rythme actuel, le capital de <strong>${fmt(capital)}</strong> permet de tenir environ <strong>${moisAutonomie.toFixed(1)} mois</strong>, soit jusqu'à environ <strong>${dateEpuis.toLocaleDateString('fr-FR',{month:'long',year:'numeric'})}</strong> sans nouvelles recettes.</div>`;
+  }
+  if(bloc2) bloc2.innerHTML = dureeHTML;
+
+  // Graphe : projection du capital net sur 12 mois
+  const labels=[], dataCapital=[];
+  let cap = capitalNetApresLivraisons;
+  const now = new Date();
+  for(let i=0;i<=12;i++){
+    const d = new Date(now.getFullYear(), now.getMonth()+i, 1);
+    labels.push(d.toLocaleDateString('fr-FR',{month:'short',year:'2-digit'}));
+    dataCapital.push(Math.round(cap));
+    cap += rythme.fluxNetMoy;
+  }
+  const ctx=document.getElementById('chart-autonomie');
+  if(ctx){
+    if(ctx._chartInst) ctx._chartInst.destroy();
+    ctx._chartInst = new Chart(ctx,{type:'line',data:{labels,datasets:[
+      {label:'Capital net projeté',data:dataCapital,borderColor:'rgba(108,143,255,0.9)',backgroundColor:'rgba(108,143,255,0.15)',fill:true,tension:0.25,pointRadius:3}
+    ]},options:{responsive:true,plugins:{legend:{labels:{color:'#dde3f5',font:{size:11}}}},scales:{x:{ticks:{color:'#5e6d99'}},y:{ticks:{color:'#5e6d99'}}}}});
+  }
+
+  const footer = document.getElementById('auto-footer-note');
+  if(footer) footer.textContent = `Calculé le ${new Date().toLocaleDateString('fr-FR')} — Rythme basé sur ${rythme.curMonth} mois écoulés en ${rythme.year}.`;
 };
 
 // ═══════════════════════════════════════════════════
