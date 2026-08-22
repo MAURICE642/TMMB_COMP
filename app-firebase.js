@@ -44,6 +44,7 @@ function notify(msg, type='ok'){
 
 function saveChargesLocal(){
   localStorage.setItem('triomphant_compta_charges', JSON.stringify(CHARGES));
+  buildIndexes();
   // Sync vers Firestore (best-effort, non bloquant) pour partager les charges
   // entre tous les appareils connectés à la même base.
   if(db_fs){
@@ -54,6 +55,53 @@ function saveChargesLocal(){
 function loadChargesLocal(){
   try { CHARGES = JSON.parse(localStorage.getItem('triomphant_compta_charges')||'[]'); }
   catch(e){ CHARGES = []; }
+  buildIndexes();
+}
+
+/* ═══════════════════════════════════════════════════
+   INDEXATION (perf) — évite les .find()/.filter() répétés
+   sur les tableaux complets à chaque rendu de page. Construit
+   une fois par chargement/modification de données, puis les
+   pages consomment des lookups en O(1) au lieu de scans en O(n).
+═══════════════════════════════════════════════════ */
+let IDX = {
+  clientsById:new Map(), commerciauxById:new Map(), articlesById:new Map(),
+  paiementsByMonth:new Map(), paiementsByClient:new Map(),
+  livraisonsByMonth:new Map(), livraisonsByClient:new Map(),
+  adhesionsByMonth:new Map(), chargesByMonth:new Map()
+};
+function _groupBy(arr, keyFn){
+  const m = new Map();
+  (arr||[]).forEach(x=>{
+    const k = keyFn(x);
+    if(k===null||k===undefined) return;
+    if(!m.has(k)) m.set(k, []);
+    m.get(k).push(x);
+  });
+  return m;
+}
+function buildIndexes(){
+  IDX.clientsById     = new Map((TDB.clients||[]).map(c=>[c._id,c]));
+  IDX.commerciauxById = new Map((TDB.commerciaux||[]).map(c=>[c._id,c]));
+  IDX.articlesById    = new Map((TDB.articles||[]).map(a=>[a._id,a]));
+  IDX.paiementsByMonth  = _groupBy(TDB.paiements,  p=>p.date?p.date.slice(0,7):null);
+  IDX.paiementsByClient = _groupBy(TDB.paiements,  p=>p.clientId);
+  IDX.livraisonsByMonth  = _groupBy(TDB.livraisons, l=>l.date?l.date.slice(0,7):null);
+  IDX.livraisonsByClient = _groupBy(TDB.livraisons, l=>l.clientId);
+  IDX.adhesionsByMonth = _groupBy(TDB.adhesionPays, a=>a.date?a.date.slice(0,7):null);
+  IDX.chargesByMonth   = _groupBy(CHARGES, c=>c.date?c.date.slice(0,7):null);
+}
+/* Retourne les entrées d'une map-par-mois pour une période donnée :
+   un mois précis ('YYYY-MM'), ou toute une année si month est vide. */
+function _monthlyRange(map, year, month){
+  if(month) return map.get(`${year}-${month}`) || [];
+  let out = [];
+  for(let m=1;m<=12;m++){
+    const key = `${year}-${String(m).padStart(2,'0')}`;
+    const arr = map.get(key);
+    if(arr) out = out.concat(arr);
+  }
+  return out;
 }
 
 function getYears(){
@@ -456,6 +504,7 @@ async function loadTDBData(){
       // On continue avec les autres collections plutôt que de bloquer toute l'app.
     }
   }
+  buildIndexes();
 }
 
 window.syncNow = async function(){
@@ -488,6 +537,7 @@ window.useDemoMode = function(){
   document.getElementById('auth-screen').classList.add('hidden');
   document.getElementById('loading-screen').classList.remove('hidden');
   injectDemoData();
+  buildIndexes();
   setTimeout(()=>{
     document.getElementById('loading-screen').classList.add('hidden');
     startApp();
@@ -601,19 +651,18 @@ function renderPg(pg){
    CALCULS COMMUNS
 ═══════════════════════════════════════════════════ */
 function totalPaiements(year, month){
-  return TDB.paiements
-    .filter(p=>p.date&&p.date.startsWith(month?`${year}-${month}`:year))
+  return _monthlyRange(IDX.paiementsByMonth, year, month)
     .reduce((a,p)=>a+Number(p.montant||0),0);
 }
 function margeLivraison(l){
   // Revenu livraison = montant vente - coût produit (pa * qty)
-  const art = TDB.articles.find(a=>a._id===l.articleId);
+  const art = IDX.articlesById.get(l.articleId);
   const cout = art ? Number(art.pa||0)*Number(l.qty||1) : 0;
   return Number(l.montant||0) - cout;
 }
 function totalLivraisons(year, month){
-  return TDB.livraisons
-    .filter(l=>l.date&&l.date.startsWith(month?`${year}-${month}`:year)&&l.statut!=='en_attente')
+  return _monthlyRange(IDX.livraisonsByMonth, year, month)
+    .filter(l=>l.statut!=='en_attente')
     .reduce((a,l)=>a+margeLivraison(l),0);
 }
 function getClientsPayesNonLivres(year, month){
@@ -653,18 +702,16 @@ function projectionClientsRestants(year, month){
   return { marge: totalMarge, nbClients: clientsIds.length, ratioCout };
 }
 function totalAdhesions(year, month){
-  return TDB.adhesionPays
-    .filter(a=>a.date&&a.date.startsWith(month?`${year}-${month}`:year))
+  return _monthlyRange(IDX.adhesionsByMonth, year, month)
     .reduce((a,p)=>a+Number(p.montant||0),0);
 }
 function totalCharges(year, month){
-  return CHARGES
-    .filter(c=>c.date&&c.date.startsWith(month?`${year}-${month}`:year))
+  return _monthlyRange(IDX.chargesByMonth, year, month)
     .reduce((a,c)=>a+Number(c.montant||0),0);
 }
 function chargesParCat(year, month){
   const map = {};
-  CHARGES.filter(c=>c.date&&c.date.startsWith(month?`${year}-${month}`:year))
+  _monthlyRange(IDX.chargesByMonth, year, month)
     .forEach(c=>{ map[c.categorie]=(map[c.categorie]||0)+Number(c.montant||0); });
   return map;
 }
@@ -1153,31 +1200,32 @@ window.renderJournal = function(){
   let pieceNum = 1;
 
   // Paiements → PRODUIT
-  TDB.paiements.filter(p=>p.date&&p.date.startsWith(month))
+  _monthlyRange(IDX.paiementsByMonth, ...month.split('-'))
     .forEach(p=>{
-      const com = TDB.commerciaux.find(c=>c._id===p.commercialId)||{nom:'?'};
-      const cl  = TDB.clients.find(c=>c._id===p.clientId)||{nom:'?'};
+      const com = IDX.commerciauxById.get(p.commercialId)||{nom:'?'};
+      const cl  = IDX.clientsById.get(p.clientId)||{nom:'?'};
       ecritures.push({date:p.date,piece:'PAY-'+String(pieceNum++).padStart(4,'0'),type:'recette',libelle:`Collecte – ${cl.nom} / ${com.nom}`,debit:0,credit:Number(p.montant||0)});
     });
 
   // Livraisons → PRODUIT (marge uniquement, statut livré)
-  TDB.livraisons.filter(l=>l.date&&l.date.startsWith(month)&&l.statut!=='en_attente')
+  _monthlyRange(IDX.livraisonsByMonth, ...month.split('-'))
+    .filter(l=>l.statut!=='en_attente')
     .forEach(l=>{
-      const art = TDB.articles.find(a=>a._id===l.articleId)||{nom:'?',pa:0};
-      const cl  = TDB.clients.find(c=>c._id===l.clientId)||{nom:'?'};
+      const art = IDX.articlesById.get(l.articleId)||{nom:'?',pa:0};
+      const cl  = IDX.clientsById.get(l.clientId)||{nom:'?'};
       const marge = margeLivraison(l);
       ecritures.push({date:l.date,piece:'LIV-'+String(pieceNum++).padStart(4,'0'),type:'livraison',libelle:`Livraison ${art.nom} – ${cl.nom} (×${l.qty}) | PV:${fmt(Number(l.montant||0))} PA:${fmt(Number(art.pa||0)*Number(l.qty||1))}`,debit:0,credit:marge});
     });
 
   // Adhésions → PRODUIT
-  TDB.adhesionPays.filter(a=>a.date&&a.date.startsWith(month))
+  _monthlyRange(IDX.adhesionsByMonth, ...month.split('-'))
     .forEach(a=>{
-      const cl  = TDB.clients.find(c=>c._id===a.clientId)||{nom:'?'};
+      const cl  = IDX.clientsById.get(a.clientId)||{nom:'?'};
       ecritures.push({date:a.date,piece:'ADH-'+String(pieceNum++).padStart(4,'0'),type:'adhesion',libelle:`Adhésion – ${cl.nom}`,debit:0,credit:Number(a.montant||0)});
     });
 
   // Charges → CHARGE (utilise pieceNum stocké si disponible)
-  CHARGES.filter(c=>c.date&&c.date.startsWith(month))
+  _monthlyRange(IDX.chargesByMonth, ...month.split('-'))
     .forEach(c=>{
       ecritures.push({date:c.date,piece:c.pieceNum||c.ref||'CHG-'+String(pieceNum++).padStart(4,'0'),type:'charge',libelle:`[${c.categorie}] ${c.libelle}`,debit:Number(c.montant||0),credit:0});
     });
@@ -1578,16 +1626,16 @@ window.renderProjection = function(){
 
   // Construire les lignes de détail
   const rows = clientsNonLivresIds.map(cid=>{
-    const client = TDB.clients.find(c=>c._id===cid);
-    const commercial = TDB.commerciaux.find(c=>c._id===client?.commercialId);
+    const client = IDX.clientsById.get(cid);
+    const commercial = IDX.commerciauxById.get(client?.commercialId);
     const nomClient = client?.nom || cid;
     const nomComm   = commercial?.nom || '—';
 
-    const paiementsClient = TDB.paiements.filter(p=>p.clientId===cid&&p.date&&p.date.startsWith(prefix));
+    const paiementsClient = (IDX.paiementsByClient.get(cid)||[]).filter(p=>p.date&&p.date.startsWith(prefix));
     const totalPaye = paiementsClient.reduce((s,p)=>s+Number(p.montant||0),0);
     const margeClient = totalPaye * (1 - proj.ratioCout);
 
-    const livraisonsClient = TDB.livraisons.filter(l=>l.clientId===cid);
+    const livraisonsClient = IDX.livraisonsByClient.get(cid)||[];
     const livraisonLabel = livraisonsClient.length===0
       ? '<span class="tag tag-red">Aucune livraison</span>'
       : `<span class="tag tag-warn">${livraisonsClient.length} livraison(s) en attente</span>`;
@@ -1631,9 +1679,9 @@ window.exportProjection = function(){
 
   const rows = [['#','Client','Commercial','Total payé (FCFA)','Marge projetée (FCFA)','Nb paiements']];
   clientsIds.forEach((cid,i)=>{
-    const client = TDB.clients.find(c=>c._id===cid);
-    const commercial = TDB.commerciaux.find(c=>c._id===client?.commercialId);
-    const paiements = TDB.paiements.filter(p=>p.clientId===cid&&p.date&&p.date.startsWith(prefix));
+    const client = IDX.clientsById.get(cid);
+    const commercial = IDX.commerciauxById.get(client?.commercialId);
+    const paiements = (IDX.paiementsByClient.get(cid)||[]).filter(p=>p.date&&p.date.startsWith(prefix));
     const totalPaye = paiements.reduce((s,p)=>s+Number(p.montant||0),0);
     const marge = totalPaye * (1 - proj.ratioCout);
     rows.push([i+1, client?.nom||cid, commercial?.nom||'—', Math.round(totalPaye), Math.round(marge), paiements.length]);
@@ -2185,6 +2233,7 @@ async function loadComptaData(){
     const items = lockSnap.exists() ? (lockSnap.data().items||[]) : [];
     localStorage.setItem('triomphant_locked_periods', JSON.stringify(items));
   } catch(e){ console.warn('Lecture Firestore (périodes verrouillées) échouée, repli local :', e.message); }
+  buildIndexes();
 }
 function isPeriodeLocked(period){ return getLockedPeriods().includes(period); }
 
