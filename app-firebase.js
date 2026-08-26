@@ -694,8 +694,8 @@ function projectionClientsRestants(year, month){
 
   let totalMarge = 0;
   clientsIds.forEach(cid=>{
-    const totalPaye = TDB.paiements
-      .filter(p=>p.clientId===cid&&p.date&&(prefix?p.date.startsWith(prefix):true))
+    const totalPaye = (IDX.paiementsByClient.get(cid)||[])
+      .filter(p=>p.date&&(prefix?p.date.startsWith(prefix):true))
       .reduce((s,p)=>s+Number(p.montant||0),0);
     totalMarge += totalPaye * (1 - ratioCout);
   });
@@ -1123,7 +1123,7 @@ window.renderResultat = function(){
           </div>
           <div style="margin-top:8px;padding:8px 14px;background:rgba(108,143,255,0.06);border:1px solid rgba(108,143,255,0.18);border-radius:8px;">
             <div style="font-size:10px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:0.7px;margin-bottom:4px;">📥 Épargne collectée (passif)</div>
-            ${row('Mises clients reçues',collectesRes,true,'var(--muted)')}
+            ${row('Mises clients reçues',recPay,true,'var(--muted)')}
             <div style="font-size:10px;color:var(--muted);margin-top:2px;">→ Dette envers clients, non comptabilisée en produits</div>
           </div>
           ${recLivEnCours>0?`
@@ -2391,14 +2391,15 @@ window.renderTresorerie = function(){
   const filter = month ? year+'-'+month : year;
 
   // ENTRÉES
-  const entPaiements  = TDB.paiements.filter(p=>p.date&&p.date.startsWith(filter)).reduce((a,p)=>a+Number(p.montant||0),0);
-  const entLivraisons = TDB.livraisons.filter(l=>l.date&&l.date.startsWith(filter)&&l.statut!=='en_attente').reduce((a,l)=>a+Number(l.montant||0),0);
-  const entAdhesions  = (TDB.adhesionPays||[]).filter(a=>a.date&&a.date.startsWith(filter)).reduce((a,x)=>a+Number(x.montant||0),0);
+  const entPaiements  = totalPaiements(year, month);
+  const entLivraisons = _monthlyRange(IDX.livraisonsByMonth, year, month).filter(l=>l.statut!=='en_attente').reduce((a,l)=>a+Number(l.montant||0),0);
+  const entAdhesions  = totalAdhesions(year, month);
   const totalEntrees  = entPaiements + entLivraisons + entAdhesions;
 
   // SORTIES
-  const sortCharges   = CHARGES.filter(c=>c.date&&c.date.startsWith(filter)).reduce((a,c)=>a+Number(c.montant||0),0);
-  const sortPersonnel = CHARGES.filter(c=>c.date&&c.date.startsWith(filter)&&c.categorie==='Personnel').reduce((a,c)=>a+Number(c.montant||0),0);
+  const chargesPeriode= _monthlyRange(IDX.chargesByMonth, year, month);
+  const sortCharges   = chargesPeriode.reduce((a,c)=>a+Number(c.montant||0),0);
+  const sortPersonnel = chargesPeriode.filter(c=>c.categorie==='Personnel').reduce((a,c)=>a+Number(c.montant||0),0);
   const totalSorties  = sortCharges;
   const fluxNet       = totalEntrees - totalSorties;
 
@@ -2420,7 +2421,7 @@ window.renderTresorerie = function(){
 
   // Sorties détail par catégorie
   const catMap={};
-  CHARGES.filter(c=>c.date&&c.date.startsWith(filter)).forEach(c=>{ catMap[c.categorie]=(catMap[c.categorie]||0)+Number(c.montant||0); });
+  chargesPeriode.forEach(c=>{ catMap[c.categorie]=(catMap[c.categorie]||0)+Number(c.montant||0); });
   const sortiesEl = document.getElementById('cf-sorties');
   if(sortiesEl) sortiesEl.innerHTML=
     Object.entries(catMap).sort((a,b)=>b[1]-a[1]).map(([cat,amt])=>
@@ -2433,11 +2434,10 @@ window.renderTresorerie = function(){
   const labels=[], dataIn=[], dataOut=[], dataNet=[];
   for(let i=0;i<12;i++){
     const m=String(i+1).padStart(2,'0');
-    const key=year+'-'+m;
-    const ein = TDB.paiements.filter(p=>p.date&&p.date.startsWith(key)).reduce((a,p)=>a+Number(p.montant||0),0)
-              + TDB.livraisons.filter(l=>l.date&&l.date.startsWith(key)&&l.statut!=='en_attente').reduce((a,l)=>a+Number(l.montant||0),0)
-              + (TDB.adhesionPays||[]).filter(a=>a.date&&a.date.startsWith(key)).reduce((a,x)=>a+Number(x.montant||0),0);
-    const eout= CHARGES.filter(c=>c.date&&c.date.startsWith(key)).reduce((a,c)=>a+Number(c.montant||0),0);
+    const ein = totalPaiements(year,m)
+              + _monthlyRange(IDX.livraisonsByMonth, year, m).filter(l=>l.statut!=='en_attente').reduce((a,l)=>a+Number(l.montant||0),0)
+              + totalAdhesions(year,m);
+    const eout= totalCharges(year,m);
     labels.push(moisNoms[i]); dataIn.push(ein); dataOut.push(eout); dataNet.push(ein-eout);
   }
   const ctx=document.getElementById('chart-cashflow');
@@ -2494,7 +2494,7 @@ function coutLivraisonsDuesTotal(){
   const ratioCout = ratioCoutMoyenArticles();
   let totalPaye = 0;
   clientsIds.forEach(cid=>{
-    totalPaye += TDB.paiements.filter(p=>p.clientId===cid).reduce((s,p)=>s+Number(p.montant||0),0);
+    totalPaye += (IDX.paiementsByClient.get(cid)||[]).reduce((s,p)=>s+Number(p.montant||0),0);
   });
   return { cout: totalPaye*ratioCout, nbClients: clientsIds.length, totalPaye, ratioCout };
 }
