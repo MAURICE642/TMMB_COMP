@@ -1704,16 +1704,26 @@ function getFpKey(){
   return `${y}-${m}`;
 }
 
+/* Initialise les sélecteurs Année/Mois de la fiche de paie.
+   CORRECTIF : cette fonction est appelée à chaque rendu (onchange). Avant,
+   elle remettait systématiquement l'année et le mois courants, ce qui
+   annulait le choix de l'utilisateur. Désormais :
+   - l'année choisie est conservée (la liste reste rafraîchie après sync) ;
+   - le mois courant n'est appliqué qu'au tout premier affichage. */
+let _fpSelectsInit = false;
 function initFichePaieSelects(){
   // Année
   const fpYear = document.getElementById('fp-year');
   if(fpYear){
+    const prevYear = fpYear.value;
     const yrs = getYears();
     fpYear.innerHTML = yrs.map(y=>`<option value="${y}"${y===CUR_YEAR?'selected':''}>${y}</option>`).join('');
+    if(prevYear && yrs.includes(prevYear)) fpYear.value = prevYear;
   }
-  // Mois courant
+  // Mois courant : uniquement à la première initialisation
   const fpMonth = document.getElementById('fp-month');
-  if(fpMonth) fpMonth.value = CUR_MONTH.slice(5,7);
+  if(fpMonth && !_fpSelectsInit) fpMonth.value = CUR_MONTH.slice(5,7);
+  _fpSelectsInit = true;
 }
 
 function populateFpCommercials(){
@@ -1747,8 +1757,10 @@ function populateFpCommercials(){
 }
 
 window.renderFichePaie = function(){
-  populateFpCommercials();
+  // Ordre important : fixer d'abord la période (année/mois), puis construire
+  // la liste des commerciaux, qui dépend de la période pour les lignes manuelles.
   initFichePaieSelects();
+  populateFpCommercials();
 
   const container = document.getElementById('fp-container');
   if(!container) return;
