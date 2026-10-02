@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="robots" content="noindex,nofollow">
-<title>Diagnostic Firestore</title>
+<title>Diagnostic Firestore v2</title>
 <style>
   :root{--bg:#07090f;--surface:#0f1320;--border:#232d45;--text:#dde3f5;--muted:#5e6d99;--ok:#2ee8b5;--warn:#fb923c;--err:#ef4444;--accent:#6c8fff;}
   *{box-sizing:border-box;margin:0;padding:0;}
@@ -24,11 +24,10 @@
 </style>
 </head>
 <body>
-  <h1>Diagnostic Firestore — lecture seule</h1>
+  <h1>Diagnostic Firestore v2 (champ _ts) — lecture seule</h1>
   <p class="sub">
-    Cette page <strong>ne modifie rien</strong>. Elle compte les documents de chaque collection et vérifie
-    la présence d'un champ de date de modification. Coût estimé : environ 1 lecture par tranche de
-    1 000 documents et par comptage, plus 3 documents d'échantillon par collection.<br>
+    Cette page <strong>ne modifie rien</strong>. Elle vérifie, pour chaque collection, la présence, le type et
+    l'activité du champ <code>_ts</code>. Coût estimé : moins de 300 lectures au total.<br>
     Connectez-vous d'abord à l'application de comptabilité avec un compte <strong>administrateur</strong>
     dans ce même navigateur, puis revenez ici. Supprimez cette page du serveur après usage.
   </p>
@@ -39,7 +38,7 @@
   </div>
 
   <div class="card wrap"><table>
-    <thead><tr><th>Collection</th><th>Nb documents</th><th>Champ de date trouvé</th><th>Docs sans ce champ</th><th>Type du champ (échantillon)</th><th>Verdict</th></tr></thead>
+    <thead><tr><th>Collection</th><th>Nb documents</th><th>Avec _ts</th><th>Type de _ts (ancien → récent)</th><th>Écrits 24 h / 7 j</th><th>Verdict</th></tr></thead>
     <tbody id="res"><tr><td colspan="6" style="color:var(--muted);">—</td></tr></tbody>
   </table></div>
 

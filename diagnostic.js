@@ -4,7 +4,7 @@
    de champs et des types (jamais les valeurs des documents).
 ═══════════════════════════════════════════════════ */
 import { initializeApp, getApps, getApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import { getFirestore, collection, doc, getDoc, getDocs, query, where, limit, getCountFromServer } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+import { getFirestore, collection, doc, getDoc, getDocs, query, where, limit, orderBy, getCountFromServer } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 import { getAuth, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 
 const FIREBASE_CONFIG = {
@@ -20,9 +20,26 @@ const db   = getFirestore(app);
 const auth = getAuth(app);
 
 // Collections lues par l'application de comptabilité
-const COLS = ['agences','commerciaux','clients','paiements','articles','stockMvts','livraisons','adhesionPays','mises','depenses'];
-// Noms possibles pour un champ « date de modification » (on ne suppose pas lequel est utilisé)
-const CANDIDATES = ['updatedAt','updated_at','modifiedAt','lastModified','dateModification','createdAt','timestamp'];
+const COLS = ['agences','commerciaux','clients','paiements','articles','stockMvts','livraisons','adhesionPays','depenses'];
+// V2 : analyse ciblée du champ « _ts » repéré dans le 1er diagnostic.
+const F = '_ts';
+
+/* Convertit une valeur de _ts en Date, quel que soit son type (sans supposer le format). */
+function toDate(v){
+  if(v == null) return null;
+  if(typeof v?.toDate === 'function') return v.toDate();
+  if(typeof v === 'number') return new Date(v > 1e12 ? v : v*1000); // ms ou secondes
+  if(typeof v === 'string'){ const d = new Date(v); return isNaN(d) ? null : d; }
+  return null;
+}
+/* Construit une valeur seuil du même type que _ts (Firestore ne compare que des valeurs de même type). */
+function threshold(sampleValue, date){
+  if(typeof sampleValue?.toDate === 'function') return date;           // Timestamp : le SDK accepte une Date
+  if(typeof sampleValue === 'number') return sampleValue > 1e12 ? date.getTime() : Math.floor(date.getTime()/1000);
+  if(typeof sampleValue === 'string') return date.toISOString();
+  return null;
+}
+const fmtD = d => d ? d.toISOString().replace('T',' ').slice(0,16) + ' UTC' : '—';
 
 const $ = id => document.getElementById(id);
 const log = m => { $('log').textContent += m + '\n'; };
@@ -66,69 +83,63 @@ $('run').addEventListener('click', async () => {
   $('res').innerHTML = '';
   $('log').textContent = '';
   const report = [];
-  let totalDocs = 0;
 
   for(const col of COLS){
     log(`Analyse de « ${col} »…`);
-    const row = { collection: col };
+    const r = { collection: col };
     try{
-      row.total = await count(collection(db, col));
-      // stockMvts et mises ne sont plus téléchargés (seulement comptés) depuis l'optimisation
-      if(!['stockMvts','mises'].includes(col)) totalDocs += row.total;
+      r.total  = await count(collection(db, col));
+      r.avecTs = await count(query(collection(db, col), where(F,'!=',null)));
+      r.sansTs = r.total - r.avecTs;
 
-      // Échantillon de 3 documents : noms de champs + type des candidats (pas les valeurs)
-      const sample = await getDocs(query(collection(db, col), limit(3)));
-      const fieldNames = new Set();
-      sample.docs.forEach(d => Object.keys(d.data()).forEach(k => fieldNames.add(k)));
-      row.champsEchantillon = [...fieldNames].sort();
+      if(r.avecTs > 0){
+        // Le plus ancien et le plus récent _ts : si les types diffèrent => types mélangés
+        const oldest = (await getDocs(query(collection(db, col), orderBy(F,'asc'),  limit(1)))).docs[0]?.data()[F];
+        const newest = (await getDocs(query(collection(db, col), orderBy(F,'desc'), limit(1)))).docs[0]?.data()[F];
+        r.typeAncien = typeOf(oldest); r.typeRecent = typeOf(newest);
+        r.plusAncien = fmtD(toDate(oldest)); r.plusRecent = fmtD(toDate(newest));
 
-      // Comptage des documents possédant chaque champ candidat (!= null => champ présent et non nul)
-      row.candidats = {};
-      for(const f of CANDIDATES){
-        try{
-          const n = await count(query(collection(db, col), where(f, '!=', null)));
-          if(n > 0) row.candidats[f] = n;
-        }catch(e){ log(`  (comptage ${f} impossible : ${e.message})`); }
+        // Activité : nb de docs écrits/modifiés ces dernières 24 h et 7 jours
+        // (= coût approximatif d'une synchro incrémentale sur ces périodes)
+        for(const [lbl, ms] of [['modifies24h', 864e5], ['modifies7j', 7*864e5]]){
+          const t = threshold(newest, new Date(Date.now()-ms));
+          if(t !== null){
+            try{ r[lbl] = await count(query(collection(db, col), where(F,'>',t))); }
+            catch(e){ log(`  (comptage ${lbl} impossible : ${e.message})`); }
+          }
+        }
       }
 
-      // Meilleur candidat : un champ de MODIFICATION de préférence, sinon de création
-      const modifFields = ['updatedAt','updated_at','modifiedAt','lastModified','dateModification'];
-      const best = modifFields.find(f => row.candidats[f]) ||
-                   Object.keys(row.candidats).sort((a,b)=>row.candidats[b]-row.candidats[a])[0] || null;
-      row.champRetenu = best;
-      row.sansChamp = best ? row.total - row.candidats[best] : row.total;
-      row.typesEchantillon = best ? [...new Set(sample.docs.map(d => typeOf(d.data()[best])))] : [];
-
-      if(!best){
-        row.verdict = 'AUCUN champ de date';
-      } else if(!modifFields.includes(best)){
-        row.verdict = 'Seulement une date de création (insuffisant pour les modifications)';
-      } else if(row.sansChamp > 0){
-        row.verdict = `${row.sansChamp} doc(s) sans « ${best} » — rattrapage nécessaire`;
-      } else if(row.typesEchantillon.length > 1){
-        row.verdict = 'Types mélangés — à harmoniser';
-      } else {
-        row.verdict = 'OK pour une synchro incrémentale';
+      // Contrôle qualité spécifique à 'commerciaux' (champs en double repérés au 1er diagnostic)
+      if(col === 'commerciaux'){
+        r.qualite = {};
+        for(const f of ['role','role ','agenceId','agencID','zone','ZONE']){
+          try{ r.qualite[f] = await count(query(collection(db, col), where(f,'!=',null))); }
+          catch(e){ r.qualite[f] = 'erreur'; }
+        }
       }
+
+      if(r.avecTs === 0)                     r.verdict = 'Pas de _ts';
+      else if(r.typeAncien !== r.typeRecent) r.verdict = 'Types mélangés';
+      else if(r.sansTs > 0)                  r.verdict = `${r.sansTs} doc(s) sans _ts`;
+      else                                   r.verdict = 'Couverture complète';
     }catch(e){
-      row.erreur = e.message;
-      row.verdict = 'Erreur (règles Firestore ?)';
+      r.erreur = e.message; r.verdict = 'Erreur';
     }
-    report.push(row);
+    report.push(r);
 
-    const cls = row.verdict.startsWith('OK') ? 'ok' : (row.erreur || row.verdict.startsWith('AUCUN')) ? 'err' : 'warn';
+    const cls = r.verdict === 'Couverture complète' ? 'ok' : (r.verdict === 'Erreur' || r.verdict === 'Pas de _ts') ? 'err' : 'warn';
     $('res').insertAdjacentHTML('beforeend', `<tr>
       <td><strong>${esc(col)}</strong></td>
-      <td>${row.total ?? '—'}</td>
-      <td>${esc(row.champRetenu || '—')}${row.candidats && Object.keys(row.candidats).length>1 ? `<br><span style="color:var(--muted);font-size:11px;">autres : ${esc(Object.keys(row.candidats).filter(k=>k!==row.champRetenu).join(', '))}</span>`:''}</td>
-      <td>${row.sansChamp ?? '—'}</td>
-      <td>${esc((row.typesEchantillon||[]).join(', ') || '—')}</td>
-      <td class="${cls}">${esc(row.verdict)}${row.erreur?`<br><span style="font-size:11px;">${esc(row.erreur)}</span>`:''}</td>
+      <td>${r.total ?? '—'}</td>
+      <td>${r.avecTs ?? '—'} / sans : ${r.sansTs ?? '—'}</td>
+      <td>${esc(r.typeAncien||'—')}${r.typeRecent && r.typeRecent!==r.typeAncien ? ' → '+esc(r.typeRecent) : ''}<br><span style="font-size:11px;color:var(--muted);">${esc(r.plusAncien||'')} → ${esc(r.plusRecent||'')}</span></td>
+      <td>${r.modifies24h ?? '—'} / ${r.modifies7j ?? '—'}</td>
+      <td class="${cls}">${esc(r.verdict)}${r.erreur?`<br><span style="font-size:11px;">${esc(r.erreur)}</span>`:''}</td>
     </tr>`);
   }
 
-  log(`\nTerminé. Total : ${totalDocs} documents téléchargés par la comptabilité (hors stockMvts et mises, seulement comptés).`);
-  log(`=> Une synchronisation complète coûte donc environ ${totalDocs} lectures.`);
-  $('out').value = JSON.stringify({ date: new Date().toISOString(), totalDocs, collections: report }, null, 2);
+  log('\nTerminé.');
+  $('out').value = JSON.stringify({ version: 2, date: new Date().toISOString(), collections: report }, null, 2);
   $('run').disabled = false;
 });
