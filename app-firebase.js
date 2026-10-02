@@ -1,5 +1,5 @@
 import { initializeApp, getApps, getApp, deleteApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import { getFirestore, collection, getDocs, addDoc, doc, getDoc, setDoc, updateDoc, deleteDoc, onSnapshot, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+import { getFirestore, collection, getDocs, addDoc, doc, getDoc, setDoc, updateDoc, deleteDoc, onSnapshot, serverTimestamp, query, where, limit, getCountFromServer } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut as fbSignOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 window._fbSignOut = fbSignOut;
 
@@ -159,6 +159,11 @@ const _fbApp = getApps().length ? getApp() : initializeApp(FIREBASE_CONFIG);
 db_fs = getFirestore(_fbApp);
 auth = getAuth(_fbApp);
 
+// [OPTIM LECTURES] Verrous de démarrage (anti double-chargement)
+let _bootInProgress = false, _appStarted = false, _autoSyncTimer = null;
+let _lastFullSync = 0;
+const AUTO_SYNC_MS = 30*60*1000; // auto-sync toutes les 30 min (avant : 5 min)
+
 // Rôles autorisés à utiliser l'application comptabilité
 const VALID_ROLES = ['admin','comptable'];
 
@@ -253,10 +258,20 @@ async function _fetchProfile(uid, email){
     const snap = await getDoc(doc(db_fs,'commerciaux', uid));
     if(snap.exists()) return {...snap.data(), _id:snap.id};
   }catch(e){}
+  // [OPTIM LECTURES] Requête ciblée (1 lecture) au lieu de lire toute la collection.
+  try{
+    const qs = await getDocs(query(collection(db_fs,'commerciaux'), where('email','==',email), limit(1)));
+    if(!qs.empty){ const d = qs.docs[0]; return {...d.data(), _id: d.id}; }
+  }catch(e){}
+  // Dernier recours (ancien comportement) : profils dont l'email est stocké avec
+  // des majuscules. Coûteux — le console.warn permet de repérer ces profils à corriger.
   try{
     const qs = await getDocs(collection(db_fs,'commerciaux'));
     const match = qs.docs.find(d => (d.data().email||'').toLowerCase() === email);
-    if(match) return {...match.data(), _id: match.id};
+    if(match){
+      console.warn('[lecture] Profil trouvé par scan complet — corrigez la casse de l\'email ou l\'ID du document :', match.id);
+      return {...match.data(), _id: match.id};
+    }
   }catch(e){}
   return null;
 }
@@ -305,6 +320,9 @@ window.doLogin = async function(){
   document.getElementById('loading-screen').classList.remove('hidden');
   document.getElementById('load-text').textContent = 'Connexion…';
 
+  // [OPTIM LECTURES] doLogin prend la main : onAuthStateChanged ne doit pas
+  // relancer un 2e chargement complet en parallèle.
+  _bootInProgress = true;
   try {
     const cred = await signInWithEmailAndPassword(auth, raw, pwd);
     const uid = cred.user.uid;
@@ -334,6 +352,7 @@ window.doLogin = async function(){
     startApp();
 
   } catch(e){
+    _bootInProgress = false;
     document.getElementById('loading-screen').classList.add('hidden');
     document.getElementById('auth-screen').classList.remove('hidden');
 
@@ -382,7 +401,10 @@ window.doLogout = async function(silent){
 ═══════════════════════════════════════════════════ */
 onAuthStateChanged(auth, async (user) => {
   if(user){
-    if(getCurrentUser()) return; // déjà géré par doLogin() dans ce même chargement de page
+    // [OPTIM LECTURES] Ignoré si doLogin() est en cours ou si l'app est déjà démarrée
+    // (l'ancien test sur sessionStorage laissait passer un double chargement à la connexion).
+    if(_bootInProgress || _appStarted) return;
+    _bootInProgress = true;
     document.getElementById('auth-screen').classList.add('hidden');
     document.getElementById('loading-screen').classList.remove('hidden');
     document.getElementById('load-text').textContent = 'Reconnexion…';
@@ -401,6 +423,7 @@ onAuthStateChanged(auth, async (user) => {
       await loadComptaData();
       startApp();
     } catch(e){
+      _bootInProgress = false;
       document.getElementById('loading-screen').classList.add('hidden');
       document.getElementById('auth-screen').classList.remove('hidden');
     }
@@ -455,7 +478,7 @@ window.adminCreateAccount = async function(){
     document.getElementById('new-acct-email').value='';
     document.getElementById('new-acct-pwd').value='';
 
-    await loadTDBData();
+    await reloadCollection('commerciaux'); // [OPTIM LECTURES] au lieu de tout recharger
     if(typeof renderComptes === 'function') renderComptes();
   } catch(e){
     let msg = e.message;
@@ -478,7 +501,7 @@ window.deleteAccount = async function(id){
   if(!confirm('Supprimer ce compte ?\n\nLe profil applicatif sera supprimé (accès immédiatement bloqué).\nLe compte de connexion Firebase devra être retiré depuis la console Firebase si vous voulez le supprimer entièrement.')) return;
   try{
     await deleteDoc(doc(db_fs,'commerciaux', id));
-    await loadTDBData();
+    await reloadCollection('commerciaux'); // [OPTIM LECTURES]
     if(typeof renderComptes === 'function') renderComptes();
     notify('✅ Compte retiré.');
   }catch(e){ notify('Erreur : '+e.message,'err'); }
@@ -491,20 +514,50 @@ function _withTimeout(promise, ms, label){
   ]);
 }
 
+/* [OPTIM LECTURES] 'stockMvts' et 'mises' ne servent QU'À afficher un nombre
+   sur la page Synchronisation (vérifié : aucun calcul ne les utilise).
+   On les compte avec getCountFromServer (≈1 lecture par tranche de 1000 docs)
+   au lieu de télécharger chaque document. */
+const COUNT_ONLY_COLS = ['stockMvts','mises'];
+let TDB_COUNTS = {};
+function tdbCount(col){ return COUNT_ONLY_COLS.includes(col) ? (TDB_COUNTS[col]||0) : (TDB[col]||[]).length; }
+
+async function _loadOneCollection(col){
+  const snap = await _withTimeout(getDocs(collection(db_fs, col)), 12000, col);
+  TDB[col] = snap.docs.map(d=>({...d.data(),_id:d.id}));
+  return snap.size;
+}
+
 async function loadTDBData(){
-  const cols = ['agences','commerciaux','clients','paiements','articles','stockMvts','livraisons','adhesionPays','mises','depenses'];
+  const cols = ['agences','commerciaux','clients','paiements','articles','livraisons','adhesionPays','depenses'];
+  let lectures = 0;
   for(const col of cols){
-    document.getElementById('load-text').textContent = `Chargement : ${col}…`;
+    const lt = document.getElementById('load-text');
+    if(lt) lt.textContent = `Chargement : ${col}…`;
     try{
-      const snap = await _withTimeout(getDocs(collection(db_fs, col)), 12000, col);
-      TDB[col] = snap.docs.map(d=>({...d.data(),_id:d.id}));
+      lectures += await _loadOneCollection(col);
     } catch(e){
       console.warn(`Chargement de "${col}" échoué :`, e.message);
       TDB[col] = TDB[col] || [];
       // On continue avec les autres collections plutôt que de bloquer toute l'app.
     }
   }
+  for(const col of COUNT_ONLY_COLS){
+    try{
+      const c = await _withTimeout(getCountFromServer(collection(db_fs, col)), 12000, col);
+      TDB_COUNTS[col] = c.data().count;
+      lectures += Math.max(1, Math.ceil(TDB_COUNTS[col]/1000));
+    }catch(e){ console.warn(`Comptage de "${col}" échoué :`, e.message); }
+  }
+  _lastFullSync = Date.now();
+  console.info(`[lecture] Synchronisation complète ≈ ${lectures} lectures Firestore`);
   buildIndexes();
+}
+
+/* Recharge une seule collection (ex. après création/suppression de compte). */
+async function reloadCollection(col){
+  try{ await _loadOneCollection(col); buildIndexes(); }
+  catch(e){ console.warn(`Rechargement de "${col}" échoué :`, e.message); }
 }
 
 window.syncNow = async function(){
@@ -527,7 +580,7 @@ function setSyncStatus(ok){
     const date = now.toLocaleDateString('fr-FR',{day:'2-digit',month:'short'});
     document.getElementById('last-sync-label').textContent = `Sync : ${date} ${time}`;
   }
-  document.getElementById('sync-count').textContent = Object.values(TDB).reduce((a,c)=>a+c.length,0);
+  document.getElementById('sync-count').textContent = Object.keys(TDB).reduce((a,k)=>a+tdbCount(k),0);
 }
 
 /* ═══════════════════════════════════════════════════
@@ -1704,26 +1757,16 @@ function getFpKey(){
   return `${y}-${m}`;
 }
 
-/* Initialise les sélecteurs Année/Mois de la fiche de paie.
-   CORRECTIF : cette fonction est appelée à chaque rendu (onchange). Avant,
-   elle remettait systématiquement l'année et le mois courants, ce qui
-   annulait le choix de l'utilisateur. Désormais :
-   - l'année choisie est conservée (la liste reste rafraîchie après sync) ;
-   - le mois courant n'est appliqué qu'au tout premier affichage. */
-let _fpSelectsInit = false;
 function initFichePaieSelects(){
   // Année
   const fpYear = document.getElementById('fp-year');
   if(fpYear){
-    const prevYear = fpYear.value;
     const yrs = getYears();
     fpYear.innerHTML = yrs.map(y=>`<option value="${y}"${y===CUR_YEAR?'selected':''}>${y}</option>`).join('');
-    if(prevYear && yrs.includes(prevYear)) fpYear.value = prevYear;
   }
-  // Mois courant : uniquement à la première initialisation
+  // Mois courant
   const fpMonth = document.getElementById('fp-month');
-  if(fpMonth && !_fpSelectsInit) fpMonth.value = CUR_MONTH.slice(5,7);
-  _fpSelectsInit = true;
+  if(fpMonth) fpMonth.value = CUR_MONTH.slice(5,7);
 }
 
 function populateFpCommercials(){
@@ -1757,10 +1800,8 @@ function populateFpCommercials(){
 }
 
 window.renderFichePaie = function(){
-  // Ordre important : fixer d'abord la période (année/mois), puis construire
-  // la liste des commerciaux, qui dépend de la période pour les lignes manuelles.
-  initFichePaieSelects();
   populateFpCommercials();
+  initFichePaieSelects();
 
   const container = document.getElementById('fp-container');
   if(!container) return;
@@ -2075,7 +2116,7 @@ window.renderImport = function(){
     {key:'adhesionPays',label:'Paiements adhésions',color:'var(--accent2)'},
     {key:'mises',label:'Mises / Contrats',color:'var(--muted)'},
   ];
-  const total = cols.reduce((a,c)=>a+TDB[c.key].length,0);
+  const total = cols.reduce((a,c)=>a+tdbCount(c.key),0);
 
   document.getElementById('import-kpi').innerHTML=`
     <div class="kpi-card kc-blue"><div class="kpi-lbl">Total enregistrements</div><div class="kpi-val kv-blue">${total}</div></div>
@@ -2086,8 +2127,8 @@ window.renderImport = function(){
   document.getElementById('tb-import').innerHTML=cols.map(c=>`
     <tr>
       <td class="fw6" style="color:${c.color};">${c.label}</td>
-      <td style="font-weight:700;">${TDB[c.key].length}</td>
-      <td><span class="tag ${TDB[c.key].length>0?'tag-green':'tag-red'}">${TDB[c.key].length>0?'✅ Chargé':'⚠️ Vide'}</span></td>
+      <td style="font-weight:700;">${tdbCount(c.key)}</td>
+      <td><span class="tag ${tdbCount(c.key)>0?'tag-green':'tag-red'}">${tdbCount(c.key)>0?'✅ Chargé':'⚠️ Vide'}</span></td>
     </tr>`).join('');
 
   document.getElementById('import-details').innerHTML=`
@@ -2188,13 +2229,23 @@ function startApp(){
     renderDashboard();
   }
 
-  // Auto-sync toutes les 5 minutes si Firebase
-  if(db_fs) setInterval(async()=>{
-    await loadTDBData();
-    setSyncStatus(true);
-    populateYearSelects();
-    if(curPg) renderPg(curPg);
-  }, 300000);
+  // [OPTIM LECTURES] Auto-sync : un seul minuteur, toutes les 30 min (au lieu de 5),
+  // et UNIQUEMENT si l'onglet est visible (un onglet oublié ne consomme plus rien).
+  _appStarted = true;
+  _bootInProgress = false;
+  if(db_fs && !_autoSyncTimer){
+    const autoSync = async()=>{
+      if(document.visibilityState !== 'visible') return;
+      if(Date.now() - _lastFullSync < AUTO_SYNC_MS - 1000) return;
+      await loadTDBData();
+      setSyncStatus(true);
+      populateYearSelects();
+      if(curPg) renderPg(curPg);
+    };
+    _autoSyncTimer = setInterval(autoSync, AUTO_SYNC_MS);
+    // Au retour sur l'onglet, rattrape une sync seulement si la dernière date de +30 min
+    document.addEventListener('visibilitychange', autoSync);
+  }
 }
 
 /* ═══════════════════════════════════════════════════
