@@ -87,6 +87,20 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--bg);colo
 }
 .no-screen{display:none;}
 
+/* ═══════ FICHE DE PAIE : impression sans en-tête/pied de page du navigateur ═══════
+   La date/heure, le titre, l'URL et le n° de page sont ajoutés par le NAVIGATEUR
+   dans les marges de la feuille. Une page nommée « fichepaie » à marge 0 ne leur
+   laisse plus de place : ils disparaissent. La marge visuelle est recréée à
+   l'intérieur de la fiche (12 mm / 14 mm) pour rester dans la zone imprimable.
+   Ne concerne QUE la fiche de paie (bilan, résultat… inchangés). */
+@media print{
+  @page fichepaie{ size:A4; margin:0; }
+  .fp-doc{ page:fichepaie; }
+  /* Sélecteur renforcé : la règle mobile (@media max-width:860px, déclenchée par la
+     largeur A4 à l'impression) imposait padding:14px et écrasait cette marge. */
+  #fp-container .fp-doc{ padding:12mm 14mm !important; margin:0 auto !important; }
+}
+
 /* ═══════ PRINT HEADER (en-tête société sur états financiers) ═══════ */
 .print-header{
   display:none;

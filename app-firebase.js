@@ -1,5 +1,5 @@
 import { initializeApp, getApps, getApp, deleteApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import { getFirestore, collection, getDocs, addDoc, doc, getDoc, setDoc, updateDoc, deleteDoc, onSnapshot, serverTimestamp, query, where, limit, getCountFromServer } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+import { getFirestore, collection, getDocs, addDoc, doc, getDoc, setDoc, updateDoc, deleteDoc, onSnapshot, serverTimestamp, query, where, limit, getCountFromServer, Timestamp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut as fbSignOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 window._fbSignOut = fbSignOut;
 
@@ -162,7 +162,7 @@ auth = getAuth(_fbApp);
 // [OPTIM LECTURES] Verrous de démarrage (anti double-chargement)
 let _bootInProgress = false, _appStarted = false, _autoSyncTimer = null;
 let _lastFullSync = 0;
-const AUTO_SYNC_MS = 30*60*1000; // auto-sync toutes les 30 min (avant : 5 min)
+const AUTO_SYNC_MS = 10*60*1000; // auto-sync toutes les 10 min (synchro incrémentale : peu coûteuse)
 
 // Rôles autorisés à utiliser l'application comptabilité
 const VALID_ROLES = ['admin','comptable'];
@@ -514,61 +514,242 @@ function _withTimeout(promise, ms, label){
   ]);
 }
 
-/* [OPTIM LECTURES] 'stockMvts' et 'mises' ne servent QU'À afficher un nombre
-   sur la page Synchronisation (vérifié : aucun calcul ne les utilise).
-   On les compte avec getCountFromServer (≈1 lecture par tranche de 1000 docs)
-   au lieu de télécharger chaque document. */
-const COUNT_ONLY_COLS = ['stockMvts','mises'];
+/* ═══════════════════════════════════════════════════
+   SYNCHRONISATION INCRÉMENTALE + CACHE LOCAL (IndexedDB)
+   ---------------------------------------------------
+   Vérifié par diagnostic (02/10/2026) : toutes les collections ci-dessous
+   ont un champ '_ts' de type Timestamp sur 100 % des documents.
+   Principe :
+   1. 1re fois sur un appareil : téléchargement complet (≈95 000 lectures),
+      enregistré dans IndexedDB.
+   2. Ensuite : on ne relit que les documents dont _ts est plus récent que
+      le dernier _ts connu (marge de sécurité de 15 min).
+   3. Contrôle de cohérence à chaque synchro : on compare le nombre de
+      documents local et serveur (getCountFromServer, ≈1 lecture / 1000 docs).
+      - Moins de docs en local  -> docs arrivés en retard (saisie hors ligne
+        avec heure du téléphone) : on élargit la fenêtre (2 j, puis 14 j).
+      - Plus de docs en local   -> suppressions côté serveur : rechargement
+        complet de CETTE collection uniquement.
+   4. Si IndexedDB est indisponible : retour automatique au chargement
+      complet (ancien comportement, l'app reste fonctionnelle).
+   ⚠ Ajouter une collection à CACHED_COLS impose d'incrémenter IDB_VER.
+═══════════════════════════════════════════════════ */
+const CACHED_COLS      = ['clients','paiements','articles','livraisons','adhesionPays','depenses'];
+const ALWAYS_FULL_COLS = ['agences','commerciaux'];   // petites, ou sans _ts (commerciaux)
+const COUNT_ONLY_COLS  = ['stockMvts','mises'];       // seulement affichées en nombre
+const IDB_NAME = 'triomphant_compta_cache', IDB_VER = 1;
+const MARGIN_MS = 15*60*1000, DAY_MS = 864e5;
+const WIDEN_STEPS = [2*DAY_MS, 14*DAY_MS];
+
 let TDB_COUNTS = {};
+let _idb = null, _cacheOK = true;
+const _memLoaded = {};          // collections déjà en mémoire dans cette session
+let _lastSyncReads = 0, _lastSyncMode = '';
+
 function tdbCount(col){ return COUNT_ONLY_COLS.includes(col) ? (TDB_COUNTS[col]||0) : (TDB[col]||[]).length; }
 
-async function _loadOneCollection(col){
-  const snap = await _withTimeout(getDocs(collection(db_fs, col)), 12000, col);
-  TDB[col] = snap.docs.map(d=>({...d.data(),_id:d.id}));
-  return snap.size;
+/* ── IndexedDB : petites fonctions utilitaires ── */
+function _idbOpen(){
+  if(_idb) return Promise.resolve(_idb);
+  return new Promise((resolve, reject)=>{
+    if(!('indexedDB' in window)) return reject(new Error('IndexedDB indisponible'));
+    const r = indexedDB.open(IDB_NAME, IDB_VER);
+    r.onupgradeneeded = ()=>{
+      const d = r.result;
+      CACHED_COLS.forEach(c=>{ if(!d.objectStoreNames.contains(c)) d.createObjectStore(c, {keyPath:'_id'}); });
+      if(!d.objectStoreNames.contains('_meta')) d.createObjectStore('_meta');
+    };
+    r.onsuccess = ()=>{ _idb = r.result; resolve(_idb); };
+    r.onerror   = ()=>reject(r.error);
+    r.onblocked = ()=>reject(new Error('IndexedDB bloquée (autre onglet ?)'));
+  });
+}
+function _idbTx(stores, mode, fn){
+  return _idbOpen().then(db=>new Promise((resolve, reject)=>{
+    const tx = db.transaction(stores, mode);
+    let out;
+    Promise.resolve(fn(tx)).then(v=>{ out = v; });
+    tx.oncomplete = ()=>resolve(out);
+    tx.onerror = tx.onabort = ()=>reject(tx.error || new Error('Transaction IndexedDB annulée'));
+  }));
+}
+const _req = r => new Promise((res, rej)=>{ r.onsuccess = ()=>res(r.result); r.onerror = ()=>rej(r.error); });
+const idbGetAll   = col => _idbTx([col], 'readonly', tx=>_req(tx.objectStore(col).getAll()));
+const idbPutMany  = (col, docs) => _idbTx([col], 'readwrite', tx=>{ const st = tx.objectStore(col); docs.forEach(d=>st.put(d)); });
+const idbReplace  = (col, docs) => _idbTx([col], 'readwrite', tx=>{ const st = tx.objectStore(col); st.clear(); docs.forEach(d=>st.put(d)); });
+const metaGet     = key => _idbTx(['_meta'], 'readonly', tx=>_req(tx.objectStore('_meta').get(key)));
+const metaSet     = (key, v) => _idbTx(['_meta'], 'readwrite', tx=>{ tx.objectStore('_meta').put(v, key); });
+
+/* Convertit un document Firestore en objet « clonable » pour IndexedDB.
+   Timestamp -> Date, référence -> chemin texte. Vérifié : aucun code de l'app
+   n'appelle .toDate() sur ces collections (seulement commerciaux, non mis en cache). */
+function _plain(v){
+  if(v === null || typeof v !== 'object') return v;
+  if(typeof v.toDate === 'function') return v.toDate();
+  if(v instanceof Date) return v;
+  if(typeof v.path === 'string' && v.firestore) return v.path;
+  if(Array.isArray(v)) return v.map(_plain);
+  const o = {}; for(const k in v) o[k] = _plain(v[k]); return o;
+}
+const _toDoc = d => ({..._plain(d.data()), _id: d.id});
+
+/* _ts max en millisecondes. Les valeurs dans le futur (> maintenant + 1 jour,
+   ex. horloge de téléphone déréglée) sont ignorées pour ne pas « sauter »
+   des documents lors des synchros suivantes. */
+function _maxTs(snapDocs, start){
+  const cap = Date.now() + DAY_MS;
+  let m = start || 0;
+  snapDocs.forEach(d=>{ const t = d.data()._ts?.toMillis?.(); if(t && t > m && t <= cap) m = t; });
+  return m;
+}
+const _countCost = n => Math.max(1, Math.ceil(n/1000));
+
+async function _fullLoad(col, stats){
+  const snap = await _withTimeout(getDocs(collection(db_fs, col)), 60000, col);
+  TDB[col] = snap.docs.map(_toDoc);
+  stats.reads += snap.size; stats.full.push(col);
+  if(_cacheOK && CACHED_COLS.includes(col)){
+    try{
+      await idbReplace(col, TDB[col]);
+      await metaSet('maxTs_'+col, _maxTs(snap.docs));
+      await metaSet('init_'+col, true);   // collection initialisée (même si vide)
+    }catch(e){ _disableCache(e); }
+  }
+  _memLoaded[col] = true;
 }
 
-async function loadTDBData(){
-  const cols = ['agences','commerciaux','clients','paiements','articles','livraisons','adhesionPays','depenses'];
-  let lectures = 0;
-  for(const col of cols){
-    const lt = document.getElementById('load-text');
-    if(lt) lt.textContent = `Chargement : ${col}…`;
-    try{
-      lectures += await _loadOneCollection(col);
-    } catch(e){
-      console.warn(`Chargement de "${col}" échoué :`, e.message);
-      TDB[col] = TDB[col] || [];
-      // On continue avec les autres collections plutôt que de bloquer toute l'app.
+function _disableCache(e){
+  if(_cacheOK) console.warn('[cache] IndexedDB désactivé, retour au chargement complet :', e?.message || e);
+  _cacheOK = false;
+}
+
+async function _syncCollection(col, stats, force){
+  if(force || !_cacheOK) return _fullLoad(col, stats);
+
+  let maxTs, map, init;
+  try{
+    init  = await metaGet('init_'+col);
+    maxTs = (await metaGet('maxTs_'+col)) || 0;
+    const local = _memLoaded[col] ? TDB[col] : await idbGetAll(col);
+    map = new Map(local.map(x=>[x._id, x]));
+  }catch(e){ _disableCache(e); return _fullLoad(col, stats); }
+
+  if(!init) return _fullLoad(col, stats);   // 1re fois sur cet appareil
+
+  const ref = collection(db_fs, col);
+  const pull = async (sinceMs)=>{
+    const snap = await _withTimeout(getDocs(query(ref, where('_ts','>', Timestamp.fromMillis(sinceMs)))), 30000, col);
+    stats.reads += Math.max(1, snap.size);          // une requête vide coûte 1 lecture
+    const docs = snap.docs.map(_toDoc);
+    docs.forEach(x=>map.set(x._id, x));
+    if(docs.length){ await idbPutMany(col, docs); stats.delta += docs.length; }
+    maxTs = _maxTs(snap.docs, maxTs);
+  };
+  const serverCount = async ()=>{
+    const c = (await _withTimeout(getCountFromServer(ref), 15000, col)).data().count;
+    stats.reads += _countCost(c);
+    return c;
+  };
+
+  try{
+    await pull(maxTs - MARGIN_MS);
+    let ok = false;
+    for(let i=0; i<=WIDEN_STEPS.length; i++){
+      const n = await serverCount();
+      if(map.size === n){ ok = true; break; }
+      if(map.size > n){                                   // suppressions côté serveur
+        console.info(`[sync] ${col} : ${map.size-n} doc(s) supprimé(s) côté serveur -> rechargement complet`);
+        break;
+      }
+      if(i < WIDEN_STEPS.length){                          // documents arrivés en retard
+        console.info(`[sync] ${col} : ${n-map.size} doc(s) manquant(s) -> fenêtre élargie à ${WIDEN_STEPS[i]/DAY_MS} j`);
+        await pull(maxTs - WIDEN_STEPS[i]);
+      }
     }
+    if(!ok) return _fullLoad(col, stats);
+    await metaSet('maxTs_'+col, maxTs);
+    TDB[col] = [...map.values()];
+    _memLoaded[col] = true;
+    stats.incr.push(col);
+  }catch(e){
+    // Échec réseau : on garde ce qu'on a en local plutôt que de tout perdre
+    console.warn(`[sync] ${col} : synchro incrémentale échouée (${e.message}) — données locales conservées`);
+    if(!_memLoaded[col]){ TDB[col] = [...map.values()]; _memLoaded[col] = true; }
+    stats.errors.push(col);
+  }
+}
+
+async function loadTDBData(opts = {}){
+  const force = !!opts.force;
+  const stats = { reads:0, delta:0, full:[], incr:[], errors:[] };
+  const setText = t => { const lt = document.getElementById('load-text'); if(lt) lt.textContent = t; };
+
+  if(_cacheOK){ try{ await _idbOpen(); }catch(e){ _disableCache(e); } }
+
+  for(const col of ALWAYS_FULL_COLS){
+    setText(`Chargement : ${col}…`);
+    try{ await _fullLoad(col, stats); }
+    catch(e){ console.warn(`Chargement de "${col}" échoué :`, e.message); TDB[col] = TDB[col] || []; stats.errors.push(col); }
+  }
+  for(const col of CACHED_COLS){
+    setText(`Synchronisation : ${col}…`);
+    try{ await _syncCollection(col, stats, force); }
+    catch(e){ console.warn(`Chargement de "${col}" échoué :`, e.message); TDB[col] = TDB[col] || []; stats.errors.push(col); }
   }
   for(const col of COUNT_ONLY_COLS){
     try{
       const c = await _withTimeout(getCountFromServer(collection(db_fs, col)), 12000, col);
-      TDB_COUNTS[col] = c.data().count;
-      lectures += Math.max(1, Math.ceil(TDB_COUNTS[col]/1000));
+      TDB_COUNTS[col] = c.data().count; stats.reads += _countCost(TDB_COUNTS[col]);
     }catch(e){ console.warn(`Comptage de "${col}" échoué :`, e.message); }
   }
+
   _lastFullSync = Date.now();
-  console.info(`[lecture] Synchronisation complète ≈ ${lectures} lectures Firestore`);
+  _lastSyncReads = stats.reads;
+  _lastSyncMode = stats.full.filter(c=>CACHED_COLS.includes(c)).length ? 'complète (partielle ou totale)' : 'incrémentale';
+  console.info(`[lecture] Synchro ${_lastSyncMode} ≈ ${stats.reads} lectures · ${stats.delta} doc(s) nouveaux/modifiés`
+    + (stats.full.length ? ` · rechargement complet : ${stats.full.join(', ')}` : '')
+    + (stats.errors.length ? ` · ERREURS : ${stats.errors.join(', ')}` : '')
+    + (_cacheOK ? '' : ' · cache local INACTIF'));
   buildIndexes();
+  return stats;
 }
 
 /* Recharge une seule collection (ex. après création/suppression de compte). */
 async function reloadCollection(col){
-  try{ await _loadOneCollection(col); buildIndexes(); }
+  try{ await _fullLoad(col, { reads:0, delta:0, full:[], incr:[], errors:[] }); buildIndexes(); }
   catch(e){ console.warn(`Rechargement de "${col}" échoué :`, e.message); }
 }
+
+/* Resynchronisation complète manuelle (filet de sécurité). */
+window.fullResync = async function(){
+  if(!confirm('Resynchronisation COMPLÈTE ?\n\nToutes les données seront re-téléchargées (environ 95 000 lectures Firestore).\nÀ utiliser uniquement si vous constatez une incohérence.')) return;
+  notify('Resynchronisation complète en cours…');
+  await loadTDBData({ force:true });
+  await loadComptaData();
+  setSyncStatus(true); populateYearSelects(); renderPg(curPg);
+  notify('Resynchronisation complète terminée ✓');
+};
+
+/* Efface le cache local de cet appareil (données clients stockées dans le navigateur). */
+window.clearLocalCache = async function(){
+  if(!confirm('Effacer les données mises en cache sur CET appareil ?\n\nLa prochaine synchronisation re-téléchargera tout (≈95 000 lectures).')) return;
+  try{
+    if(_idb){ _idb.close(); _idb = null; }
+    await new Promise((res, rej)=>{ const r = indexedDB.deleteDatabase(IDB_NAME); r.onsuccess = res; r.onerror = ()=>rej(r.error); r.onblocked = res; });
+    Object.keys(_memLoaded).forEach(k=>delete _memLoaded[k]);
+    notify('Cache local effacé ✓');
+  }catch(e){ notify('Erreur : '+e.message, 'err'); }
+};
 
 window.syncNow = async function(){
   if(!db_fs){ notify('Non connecté à Firebase','err'); return; }
   notify('Synchronisation en cours…');
-  await loadTDBData();
+  const st = await loadTDBData();
   await loadComptaData();
   setSyncStatus(true);
   populateYearSelects();
   renderPg(curPg);
-  notify('Synchronisation réussie ✓');
+  notify(st.errors.length ? `Synchronisation partielle ⚠️ (${st.errors.join(', ')})` : `Synchronisation réussie ✓ (${st.delta} nouveauté(s))`, st.errors.length?'err':'ok');
 };
 
 function setSyncStatus(ok){
@@ -1757,16 +1938,25 @@ function getFpKey(){
   return `${y}-${m}`;
 }
 
+/* [CORRECTIF MOIS PASSÉ] Avant : cette fonction remettait le mois courant et
+   l'année courante à CHAQUE rendu, donc tout choix d'un mois/année passé était
+   aussitôt annulé (la fiche était calculée sur le mois en cours).
+   Maintenant : le mois courant n'est appliqué qu'au 1er affichage, et l'année
+   choisie est conservée quand la liste des années est reconstruite. */
+let _fpSelectsReady = false;
 function initFichePaieSelects(){
-  // Année
+  // Année : on reconstruit la liste (nouvelles années possibles) en gardant le choix
   const fpYear = document.getElementById('fp-year');
   if(fpYear){
+    const prev = fpYear.value;
     const yrs = getYears();
-    fpYear.innerHTML = yrs.map(y=>`<option value="${y}"${y===CUR_YEAR?'selected':''}>${y}</option>`).join('');
+    fpYear.innerHTML = yrs.map(y=>`<option value="${y}">${y}</option>`).join('');
+    fpYear.value = (prev && yrs.includes(prev)) ? prev : CUR_YEAR;
   }
-  // Mois courant
+  // Mois courant : seulement au tout premier affichage
   const fpMonth = document.getElementById('fp-month');
-  if(fpMonth) fpMonth.value = CUR_MONTH.slice(5,7);
+  if(fpMonth && !_fpSelectsReady) fpMonth.value = CUR_MONTH.slice(5,7);
+  _fpSelectsReady = true;
 }
 
 function populateFpCommercials(){
@@ -1800,8 +1990,8 @@ function populateFpCommercials(){
 }
 
 window.renderFichePaie = function(){
-  populateFpCommercials();
-  initFichePaieSelects();
+  initFichePaieSelects();   // d'abord les sélecteurs (mois/année)…
+  populateFpCommercials();  // …puis la liste, qui dépend du mois choisi (lignes manuelles)
 
   const container = document.getElementById('fp-container');
   if(!container) return;
@@ -2137,7 +2327,9 @@ window.renderImport = function(){
     CA total collecté : <strong style="color:var(--accent2);">${fmt(TDB.paiements.reduce((a,p)=>a+Number(p.montant||0),0))}</strong><br>
     Total livraisons : <strong style="color:var(--accent);">${fmt(TDB.livraisons.reduce((a,l)=>a+Number(l.montant||0),0))}</strong><br>
     Valeur stock : <strong style="color:var(--accent3);">${fmt(TDB.articles.reduce((a,art)=>a+Number(art.stock||0)*Number(art.pa||0),0))}</strong><br>
-    Charges locales : <strong style="color:var(--red);">${fmt(CHARGES.reduce((a,c)=>a+Number(c.montant||0),0))}</strong>`;
+    Charges locales : <strong style="color:var(--red);">${fmt(CHARGES.reduce((a,c)=>a+Number(c.montant||0),0))}</strong><br>
+    Dernière synchro : <strong>${esc(_lastSyncMode||'—')}</strong> · ≈ <strong>${_lastSyncReads}</strong> lectures Firestore<br>
+    Cache local (cet appareil) : <strong style="color:${_cacheOK?'var(--accent2)':'var(--warn)'};">${_cacheOK?'actif':'inactif — chargement complet à chaque synchro'}</strong>`;
 };
 
 /* ═══════════════════════════════════════════════════

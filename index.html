@@ -371,7 +371,11 @@
       <div class="page" id="page-import">
         <div class="sec-hdr">
           <div class="sec-title">Synchronisation TRIOMPHANT</div>
-          <button class="btn btn-primary btn-sm no-print" onclick="syncNow()">🔄 Synchroniser maintenant</button>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button class="btn btn-primary btn-sm no-print" onclick="syncNow()">🔄 Synchroniser maintenant</button>
+            <button class="btn btn-ghost btn-sm no-print" onclick="fullResync()" title="Re-télécharge toutes les données (≈95 000 lectures)">♻️ Resynchro complète</button>
+            <button class="btn btn-danger btn-sm no-print" onclick="clearLocalCache()" title="Efface les données stockées sur cet appareil">🧹 Effacer le cache local</button>
+          </div>
         </div>
         <div class="alert alert-success" id="import-status">✅ Données synchronisées depuis Firebase en lecture seule.</div>
         <div class="kpi-row kpi-4" id="import-kpi"></div>
