@@ -1,5 +1,5 @@
 import { initializeApp, getApps, getApp, deleteApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import { getFirestore, collection, getDocs, addDoc, doc, getDoc, setDoc, updateDoc, deleteDoc, onSnapshot, serverTimestamp, query, where, limit, getCountFromServer, Timestamp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+import { getFirestore, collection, getDocs, addDoc, doc, getDoc, setDoc, updateDoc, deleteDoc, onSnapshot, serverTimestamp, query, where, limit, getCountFromServer, Timestamp, orderBy, startAfter, documentId } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut as fbSignOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 window._fbSignOut = fbSignOut;
 
@@ -544,7 +544,7 @@ const WIDEN_STEPS = [2*DAY_MS, 14*DAY_MS];
 let TDB_COUNTS = {};
 let _idb = null, _cacheOK = true;
 const _memLoaded = {};          // collections déjà en mémoire dans cette session
-let _lastSyncReads = 0, _lastSyncMode = '';
+let _lastSyncReads = 0, _lastSyncMode = '', _lastSyncErrors = [];
 
 function tdbCount(col){ return COUNT_ONLY_COLS.includes(col) ? (TDB_COUNTS[col]||0) : (TDB[col]||[]).length; }
 
@@ -604,15 +604,82 @@ function _maxTs(snapDocs, start){
 }
 const _countCost = n => Math.max(1, Math.ceil(n/1000));
 
-async function _fullLoad(col, stats){
-  const snap = await _withTimeout(getDocs(collection(db_fs, col)), 60000, col);
-  TDB[col] = snap.docs.map(_toDoc);
-  stats.reads += snap.size; stats.full.push(col);
-  if(_cacheOK && CACHED_COLS.includes(col)){
+/* ── Chargement complet PAR PAGES, avec reprise ──
+   [CORRECTIF PAIEMENTS VIDES] Avant : une seule requête pour toute la collection
+   (74 000 paiements ≈ plusieurs dizaines de Mo) avec un délai de 60 s -> échec
+   sur connexion lente, erreur silencieuse, paiements vides.
+   Maintenant : pages de 2 000 documents, 3 essais par page, progression affichée.
+   Chaque page est enregistrée dans IndexedDB : si le téléchargement est coupé,
+   la synchro suivante REPREND là où elle s'était arrêtée (aucune relecture). */
+const PAGE_SIZE = 2000, PAGE_TIMEOUT = 45000, PAGE_RETRIES = 3;
+
+async function _getPage(ref, afterId, label){
+  const q = afterId
+    ? query(ref, orderBy(documentId()), startAfter(afterId), limit(PAGE_SIZE))
+    : query(ref, orderBy(documentId()), limit(PAGE_SIZE));
+  for(let a = 1; ; a++){
+    try{ return await _withTimeout(getDocs(q), PAGE_TIMEOUT, label); }
+    catch(e){
+      if(a >= PAGE_RETRIES) throw e;
+      console.warn(`[sync] ${label} : page en échec (essai ${a}/${PAGE_RETRIES}) — ${e.message}`);
+      await new Promise(r=>setTimeout(r, 2000*a));
+    }
+  }
+}
+
+/* Repère de départ = _ts le plus récent AVANT le téléchargement (1 lecture).
+   Les documents modifiés pendant le téléchargement seront rattrapés ensuite par
+   la synchro incrémentale. Les _ts dans le futur (horloge de téléphone) sont exclus. */
+async function _currentWatermark(ref){
+  const snap = await _withTimeout(getDocs(query(ref, where('_ts','<=', Timestamp.fromMillis(Date.now()+DAY_MS)), orderBy('_ts','desc'), limit(1))), 20000, 'repère');
+  return snap.docs[0]?.data()._ts?.toMillis?.() || 0;
+}
+
+async function _fullLoad(col, stats, fresh){
+  const ref = collection(db_fs, col);
+  let useCache = _cacheOK && CACHED_COLS.includes(col);
+  let afterId = null, watermark = 0, docs = [];
+  const setText = t => { const lt = document.getElementById('load-text'); if(lt) lt.textContent = t; };
+
+  if(useCache){
     try{
-      await idbReplace(col, TDB[col]);
-      await metaSet('maxTs_'+col, _maxTs(snap.docs));
+      const st = fresh ? null : await metaGet('full_'+col);
+      if(st && st.afterId){                                   // reprise d'un téléchargement coupé
+        afterId = st.afterId; watermark = st.watermark || 0;
+        docs = await idbGetAll(col);
+        console.info(`[sync] ${col} : reprise du téléchargement (${docs.length} doc(s) déjà reçus)`);
+      } else {                                                // nouveau téléchargement
+        watermark = await _currentWatermark(ref); stats.reads += 1;
+        await metaSet('init_'+col, false);
+        await idbReplace(col, []);
+        await metaSet('full_'+col, { afterId:null, watermark });
+      }
+    }catch(e){ _disableCache(e); useCache = false; afterId = null; docs = []; }
+  }
+
+  while(true){
+    setText(`Chargement : ${col}… ${docs.length.toLocaleString('fr-FR')} documents`);
+    const snap = await _getPage(ref, afterId, col);
+    stats.reads += Math.max(1, snap.size);
+    const page = snap.docs.map(_toDoc);
+    for(const d of page) docs.push(d);
+    if(snap.size) afterId = snap.docs[snap.docs.length-1].id;
+    if(useCache && page.length){
+      try{
+        await idbPutMany(col, page);
+        await metaSet('full_'+col, { afterId, watermark });
+      }catch(e){ _disableCache(e); useCache = false; }
+    }
+    if(snap.size < PAGE_SIZE) break;
+  }
+
+  TDB[col] = docs;
+  stats.full.push(col);
+  if(useCache){
+    try{
+      await metaSet('maxTs_'+col, watermark);
       await metaSet('init_'+col, true);   // collection initialisée (même si vide)
+      await metaSet('full_'+col, null);
     }catch(e){ _disableCache(e); }
   }
   _memLoaded[col] = true;
@@ -624,7 +691,7 @@ function _disableCache(e){
 }
 
 async function _syncCollection(col, stats, force){
-  if(force || !_cacheOK) return _fullLoad(col, stats);
+  if(force || !_cacheOK) return _fullLoad(col, stats, true);
 
   let maxTs, map, init;
   try{
@@ -632,9 +699,9 @@ async function _syncCollection(col, stats, force){
     maxTs = (await metaGet('maxTs_'+col)) || 0;
     const local = _memLoaded[col] ? TDB[col] : await idbGetAll(col);
     map = new Map(local.map(x=>[x._id, x]));
-  }catch(e){ _disableCache(e); return _fullLoad(col, stats); }
+  }catch(e){ _disableCache(e); return _fullLoad(col, stats, true); }
 
-  if(!init) return _fullLoad(col, stats);   // 1re fois sur cet appareil
+  if(!init) return _fullLoad(col, stats, false);   // 1re fois sur cet appareil, ou reprise
 
   const ref = collection(db_fs, col);
   const pull = async (sinceMs)=>{
@@ -666,7 +733,7 @@ async function _syncCollection(col, stats, force){
         await pull(maxTs - WIDEN_STEPS[i]);
       }
     }
-    if(!ok) return _fullLoad(col, stats);
+    if(!ok) return _fullLoad(col, stats, true);
     await metaSet('maxTs_'+col, maxTs);
     TDB[col] = [...map.values()];
     _memLoaded[col] = true;
@@ -705,6 +772,10 @@ async function loadTDBData(opts = {}){
 
   _lastFullSync = Date.now();
   _lastSyncReads = stats.reads;
+  _lastSyncErrors = stats.errors.filter(c=>c!=='agences');
+  if(_lastSyncErrors.length){
+    notify(`⚠️ Chargement incomplet : ${_lastSyncErrors.join(', ')} — les totaux sont FAUX. Cliquez 🔄 Synchroniser pour reprendre.`, 'err');
+  }
   _lastSyncMode = stats.full.filter(c=>CACHED_COLS.includes(c)).length ? 'complète (partielle ou totale)' : 'incrémentale';
   console.info(`[lecture] Synchro ${_lastSyncMode} ≈ ${stats.reads} lectures · ${stats.delta} doc(s) nouveaux/modifiés`
     + (stats.full.length ? ` · rechargement complet : ${stats.full.join(', ')}` : '')
@@ -753,8 +824,9 @@ window.syncNow = async function(){
 };
 
 function setSyncStatus(ok){
-  document.getElementById('sync-dot').className = 'sync-dot'+(ok?'':' off');
-  document.getElementById('sync-label').textContent = ok?'Connecté':'Hors ligne';
+  const incomplet = ok && _lastSyncErrors.length > 0;
+  document.getElementById('sync-dot').className = 'sync-dot'+(ok && !incomplet ?'':' off');
+  document.getElementById('sync-label').textContent = !ok ? 'Hors ligne' : (incomplet ? '⚠️ Données incomplètes' : 'Connecté');
   if(ok){
     const now = new Date();
     const time = now.toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
@@ -2295,6 +2367,13 @@ window.exportFichePaieCSV = function(){
    IMPORT / SYNC
 ═══════════════════════════════════════════════════ */
 window.renderImport = function(){
+  const stEl = document.getElementById('import-status');
+  if(stEl){
+    stEl.className = 'alert ' + (_lastSyncErrors.length ? 'alert-danger' : 'alert-success');
+    stEl.textContent = _lastSyncErrors.length
+      ? `⚠️ Chargement incomplet : ${_lastSyncErrors.join(', ')}. Les totaux affichés sont faux. Cliquez « Synchroniser maintenant » : le téléchargement reprendra là où il s'est arrêté.`
+      : '✅ Données synchronisées depuis Firebase en lecture seule.';
+  }
   const cols = [
     {key:'agences',label:'Agences',color:'var(--accent)'},
     {key:'commerciaux',label:'Utilisateurs / Commerciaux',color:'var(--purple)'},
