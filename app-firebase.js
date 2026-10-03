@@ -2061,6 +2061,65 @@ function populateFpCommercials(){
   sel.innerHTML = options;
 }
 
+/* ═══ PERSONNEL ADMINISTRATIF ═══
+   Salaire de base par défaut selon le type de personnel. Ces valeurs ne sont
+   appliquées qu'au moment où l'on CHANGE de type : une saisie manuelle du
+   salaire de base reste toujours possible ensuite. */
+const FP_SALBASE_DEFAUT = { commercial: 45000, admin: 60000 };
+const FP_POSTE_DEFAUT   = { commercial: 'Agent Commercial', admin: '' };
+
+window.onFpTypeChange = function(){
+  const type = document.getElementById('fp-type')?.value || 'commercial';
+  const isAdmin = type === 'admin';
+  const show = (id, on) => { const el = document.getElementById(id); if(el) el.style.display = on ? 'flex' : 'none'; };
+  show('fp-wrap-commercial', !isAdmin);
+  show('fp-wrap-taux', !isAdmin);
+  show('fp-wrap-admin', isAdmin);
+  const sb = document.getElementById('fp-salbase'); if(sb) sb.value = FP_SALBASE_DEFAUT[type];
+  const cv = document.getElementById('fp-carbu'); if(cv) cv.value = 0;
+  _fpCarbuKey = null;
+  const po = document.getElementById('fp-poste');
+  if(po){ po.value = FP_POSTE_DEFAUT[type]; po.placeholder = isAdmin ? 'Ex. : Secrétaire' : ''; }
+  renderFichePaie();
+};
+
+/* ═══ DÉPENSES DU COMMERCIAL : séparation carburant/vidange ═══
+   Les dépenses dont la nature contient « carbur » ou « vidange » (insensible aux
+   majuscules et aux accents : Carburant, CARBURANT, Vidange…) ne sont PLUS déduites
+   de la prime sur rendement : elles vont dans la retenue « Carburation / vidange ».
+   Les autres natures (Entraide, Réparation, Transport…) restent déduites de la prime.
+   Une dépense sans nature reste dans « autres dépenses » (comportement d'avant). */
+function _normTxt(v){ return String(v||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim(); }
+function _isCarbuVidange(d){ const n = _normTxt(d.nature); return n.includes('carbur') || n.includes('vidange'); }
+function _depensesCommercial(commId, periodePrefix){
+  const res = { autres:0, carbuVidange:0, detail:{} };
+  if(!commId) return res;
+  (TDB.depenses||[])
+    .filter(d => d.commercialId === commId && (d.date||'').startsWith(periodePrefix))
+    .forEach(d => {
+      const m = Number(d.montant||0);
+      const nat = String(d.nature||'(sans nature)').trim() || '(sans nature)';
+      res.detail[nat] = (res.detail[nat]||0) + m;
+      if(_isCarbuVidange(d)) res.carbuVidange += m; else res.autres += m;
+    });
+  return res;
+}
+/* Pré-remplissage de la case « Carburation / vidange » : uniquement quand le
+   commercial ou le mois change, pour qu'une correction manuelle reste possible. */
+let _fpCarbuKey = null;
+
+/* Identité du salarié sélectionné (commercial ou administration). */
+function _fpPersonnel(){
+  const isAdmin = (document.getElementById('fp-type')?.value || 'commercial') === 'admin';
+  if(isAdmin){
+    const nom = (document.getElementById('fp-nom-admin')?.value || '').trim();
+    const initiales = nom.split(/\s+/).filter(Boolean).map(w=>w[0]).join('').toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,4) || 'X';
+    return { isAdmin, commId:'', nom, codeMatricule: 'ADM-' + initiales };
+  }
+  const commId = document.getElementById('fp-commercial')?.value || '';
+  return { isAdmin, commId, nom:'', codeMatricule: commId.slice(-4).toUpperCase() };
+}
+
 window.renderFichePaie = function(){
   initFichePaieSelects();   // d'abord les sélecteurs (mois/année)…
   populateFpCommercials();  // …puis la liste, qui dépend du mois choisi (lignes manuelles)
@@ -2068,7 +2127,9 @@ window.renderFichePaie = function(){
   const container = document.getElementById('fp-container');
   if(!container) return;
 
-  const commId  = document.getElementById('fp-commercial')?.value || '';
+  const pers    = _fpPersonnel();
+  const isAdmin = pers.isAdmin;
+  const commId  = pers.commId;
   const year    = document.getElementById('fp-year')?.value || CUR_YEAR;
   const month   = document.getElementById('fp-month')?.value || CUR_MONTH.slice(5,7);
   const taux    = Number(document.getElementById('fp-taux')?.value||7)/100;
@@ -2077,15 +2138,15 @@ window.renderFichePaie = function(){
   const its     = Number(document.getElementById('fp-its')?.value||0)/100;
   const poste   = document.getElementById('fp-poste')?.value || 'Commercial';
 
-  if(!commId){
-    container.innerHTML = '<div style="text-align:center;padding:60px 0;color:var(--muted);font-size:14px;">👆 Sélectionnez un commercial pour générer la fiche de paie</div>';
+  if(isAdmin ? !pers.nom : !commId){
+    container.innerHTML = `<div style="text-align:center;padding:60px 0;color:var(--muted);font-size:14px;">👆 ${isAdmin ? 'Saisissez le nom du membre de l\'administration' : 'Sélectionnez un commercial'} pour générer la fiche de paie</div>`;
     return;
   }
 
   // Trouver le commercial
-  let comm = TDB.commerciaux.find(c=>c._id===commId);
-  let nomComm = comm ? (comm.nom||comm.name||commId) : '';
-  if(!comm){
+  let comm = isAdmin ? null : TDB.commerciaux.find(c=>c._id===commId);
+  let nomComm = isAdmin ? pers.nom : (comm ? (comm.nom||comm.name||commId) : '');
+  if(!comm && !isAdmin){
     // Chercher dans les lignes manuelles
     const key = `${year}-${month}`;
     const ligne = (SAL_DATA[key]||[]).find(l=>l.id===commId);
@@ -2100,7 +2161,7 @@ window.renderFichePaie = function(){
   // Collecte du mois
   const key = `${year}-${month}`;
   let collecte = 0;
-  const salLigne = (SAL_DATA[key]||[]).find(l=>l.id===commId);
+  const salLigne = isAdmin ? null : (SAL_DATA[key]||[]).find(l=>l.id===commId);
   if(salLigne){
     collecte = Number(salLigne.collecte||0);
   } else if(comm){
@@ -2120,20 +2181,25 @@ window.renderFichePaie = function(){
   const caution        = Number(document.getElementById('fp-caution')?.value||0);
   const manquant       = Number(document.getElementById('fp-manquant')?.value||0);
   const epargne        = Number(document.getElementById('fp-epargne')?.value||0);
-  const commission     = collecte * taux;
-  // Dépenses sur le commercial = somme des dépenses (Entraide, Carburant, Vidange,
-  // Réparation, Transport, Communication, Autre) enregistrées pour ce commercial
-  // sur le mois/année sélectionnés, lues depuis la collection Firestore 'depenses'
-  // (partagée avec l'application de gestion des commerciaux).
+  const commission     = isAdmin ? 0 : collecte * taux;
+  // Dépenses du commercial (collection Firestore 'depenses', mois/année choisis),
+  // séparées en : carburant/vidange -> retenue ; autres -> déduites de la prime.
   const periodePrefix = `${year}-${month}`;
-  const depensesCommercial = (TDB.depenses||[])
-    .filter(d => d.commercialId === commId && (d.date||'').startsWith(periodePrefix))
-    .reduce((sum,d) => sum + Number(d.montant||0), 0);
-  const primeRendement = commission - salBase - depensesCommercial;
+  const dep = isAdmin ? _depensesCommercial('', '') : _depensesCommercial(commId, periodePrefix);
+  // Administration : pas de collecte, donc ni commission ni prime sur rendement
+  // (sinon elle vaudrait -salaire de base et annulerait le salaire).
+  const depensesCommercial = dep.autres;
+  const carbuEl = document.getElementById('fp-carbu');
+  if(!isAdmin && carbuEl){
+    const k = commId + '|' + periodePrefix;
+    if(_fpCarbuKey !== k){ carbuEl.value = Math.round(dep.carbuVidange); _fpCarbuKey = k; }
+  }
+  const carbuVidange   = Number(carbuEl?.value||0);
+  const primeRendement = isAdmin ? 0 : commission - salBase - depensesCommercial;
   const brutTotal      = salBase + primeRendement + primeMotivation + primeHebdo + prime;
   const cotCNSS        = brutTotal * cnss;
   const cotITS         = brutTotal * its;
-  const totalRetenues  = cotCNSS + cotITS + avance + dettes + caution + manquant + epargne;
+  const totalRetenues  = cotCNSS + cotITS + avance + dettes + caution + manquant + epargne + carbuVidange;
   const netAPayer      = brutTotal - totalRetenues;
 
   // Période en lettres
@@ -2141,7 +2207,7 @@ window.renderFichePaie = function(){
   const periodeStr = `${moisNoms[parseInt(month)-1]} ${year}`;
 
   // Numéro de fiche
-  const numFiche = `FP-${year}${month}-${commId.slice(-4).toUpperCase()}`;
+  const numFiche = `FP-${year}${month}-${pers.codeMatricule}`;
 
   // Nb paiements du mois
   const nbPaie = comm ? TDB.paiements.filter(p=>p.commercialId===commId && p.date && p.date.startsWith(`${year}-${month}`)).length : 0;
@@ -2167,8 +2233,8 @@ window.renderFichePaie = function(){
     <hr class="fp-info-sep">
     <div class="fp-info-bloc">
       <p><strong>Informations du salarié</strong></p>
-      <p>Nom &amp; Prénoms : <strong>${nomComm||'—'}</strong></p>
-      <p>Fonction / Poste : <strong>${poste.toUpperCase()}</strong></p>
+      <p>Nom &amp; Prénoms : <strong>${esc(nomComm)||'—'}</strong></p>
+      <p>Fonction / Poste : <strong>${esc(poste.toUpperCase())||'—'}</strong></p>
       <p>Matricule : <strong>${numFiche}</strong></p>
       <p>Période de paie : <strong>01/${month}/${year} au ${new Date(parseInt(year), parseInt(month), 0).getDate()}/${month}/${year}</strong></p>
     </div>
@@ -2187,14 +2253,14 @@ window.renderFichePaie = function(){
           <td>Salaire de base</td>
           <td class="r">${Math.round(salBase).toLocaleString('fr-FR')}</td>
         </tr>
-        <tr>
+        ${isAdmin ? '' : `<tr>
           <td>Prime sur rendement</td>
           <td class="r">${Math.round(primeRendement).toLocaleString('fr-FR')}</td>
         </tr>
         <tr class="no-print">
-          <td style="padding-left:24px;font-size:11px;color:var(--muted);">dont dépenses déduites (carburant, vidange, entraide...)</td>
+          <td style="padding-left:24px;font-size:11px;color:var(--muted);">dont dépenses déduites (hors carburant/vidange : entraide, réparation…)</td>
           <td class="r" style="font-size:11px;color:var(--muted);">${depensesCommercial>0?'-'+Math.round(depensesCommercial).toLocaleString('fr-FR'):'---'}</td>
-        </tr>
+        </tr>`}
         <tr>
           <td>Prime de motivation</td>
           <td class="r">${Math.round(primeMotivation).toLocaleString('fr-FR')}</td>
@@ -2241,6 +2307,14 @@ window.renderFichePaie = function(){
           <td class="r">${manquant>0?Math.round(manquant).toLocaleString('fr-FR'):'<span class="fp-dash">---</span>'}</td>
         </tr>
         <tr>
+          <td>Carburation / vidange</td>
+          <td class="r">${carbuVidange>0?Math.round(carbuVidange).toLocaleString('fr-FR'):'<span class="fp-dash">---</span>'}</td>
+        </tr>
+        ${!isAdmin && Math.round(carbuVidange) !== Math.round(dep.carbuVidange) ? `<tr class="no-print">
+          <td style="padding-left:24px;font-size:11px;color:var(--warn);">⚠️ montant modifié à la main — relevé dans les dépenses : ${Math.round(dep.carbuVidange).toLocaleString('fr-FR')}</td>
+          <td></td>
+        </tr>` : ''}
+        <tr>
           <td>Retenue CNSS ${cnss>0?'('+Number(cnss*100).toFixed(1)+'%)':''}</td>
           <td class="r">${cnss>0?Math.round(cotCNSS).toLocaleString('fr-FR'):'<span class="fp-dash">---</span>'}</td>
         </tr>
@@ -2250,6 +2324,11 @@ window.renderFichePaie = function(){
         </tr>
       </tbody>
     </table>
+
+    ${!isAdmin && Object.keys(dep.detail).length ? `<div class="no-print" style="font-size:11px;color:#555;background:#f4f6fb;border:1px dashed #aab;border-radius:6px;padding:8px 10px;margin:-4px 0 12px;">
+      <strong>Contrôle (non imprimé)</strong> — dépenses du mois par nature :
+      ${Object.entries(dep.detail).map(([n,m])=>`${esc(n)} : ${Math.round(m).toLocaleString('fr-FR')} → ${_isCarbuVidange({nature:n})?'<strong>retenue Carburation / vidange</strong>':'déduit de la prime'}`).join(' · ')}
+    </div>` : ''}
 
     <!-- NET À PAYER -->
     <div class="fp-net-label-off" style="font-size:13px;font-weight:900;text-transform:uppercase;text-decoration:underline;margin:10px 0 6px;">Net à Payer</div>
@@ -2282,7 +2361,7 @@ window.renderFichePaie = function(){
       </div>
       <div class="fp-sig-bloc">
         <div class="fp-sig-label">Salarié</div>
-        <div class="fp-sig-line">${nomComm||''}</div>
+        <div class="fp-sig-line">${esc(nomComm)}</div>
       </div>
     </div>
 
@@ -2290,8 +2369,10 @@ window.renderFichePaie = function(){
 };
 
 window.exportFichePaieCSV = function(){
-  const commId  = document.getElementById('fp-commercial')?.value || '';
-  if(!commId){ notify('Sélectionnez un commercial','err'); return; }
+  const pers    = _fpPersonnel();
+  const isAdmin = pers.isAdmin;
+  const commId  = pers.commId;
+  if(isAdmin ? !pers.nom : !commId){ notify(isAdmin ? 'Saisissez le nom du salarié' : 'Sélectionnez un commercial','err'); return; }
   const year    = document.getElementById('fp-year')?.value || CUR_YEAR;
   const month   = document.getElementById('fp-month')?.value || CUR_MONTH.slice(5,7);
   const taux    = Number(document.getElementById('fp-taux')?.value||7)/100;
@@ -2307,25 +2388,25 @@ window.exportFichePaieCSV = function(){
   const caution = Number(document.getElementById('fp-caution')?.value||0);
   const manquant = Number(document.getElementById('fp-manquant')?.value||0);
   const epargne = Number(document.getElementById('fp-epargne')?.value||0);
-
-  let comm = TDB.commerciaux.find(c=>c._id===commId);
-  const nomComm = comm ? (comm.nom||comm.name||commId) : commId;
+  let comm = isAdmin ? null : TDB.commerciaux.find(c=>c._id===commId);
+  const nomComm = isAdmin ? pers.nom : (comm ? (comm.nom||comm.name||commId) : commId);
   const key = `${year}-${month}`;
-  const salLigne = (SAL_DATA[key]||[]).find(l=>l.id===commId);
-  const collecte = salLigne ? Number(salLigne.collecte||0) : (comm ? getCollecteCommercial(commId, year, month) : 0);
+  const salLigne = isAdmin ? null : (SAL_DATA[key]||[]).find(l=>l.id===commId);
+  const collecte = isAdmin ? 0 : (salLigne ? Number(salLigne.collecte||0) : (comm ? getCollecteCommercial(commId, year, month) : 0));
   const primeTotal = prime > 0 ? prime : (salLigne ? Number(salLigne.prime||0) : 0);
-  const commission  = collecte * taux;
+  const commission  = isAdmin ? 0 : collecte * taux;
   // Dépenses sur le commercial, lues depuis Firestore (collection 'depenses'),
   // filtrées par commercial et par mois/année sélectionnés.
   const periodePrefix = `${year}-${month}`;
-  const depensesCommercial = (TDB.depenses||[])
-    .filter(d => d.commercialId === commId && (d.date||'').startsWith(periodePrefix))
-    .reduce((sum,d) => sum + Number(d.montant||0), 0);
-  const primeRendement = commission - salBase - depensesCommercial;
+  const dep = isAdmin ? _depensesCommercial('', '') : _depensesCommercial(commId, periodePrefix);
+  const depensesCommercial = dep.autres;            // hors carburant/vidange
+  // Même valeur que la case affichée (pré-remplie depuis les dépenses, corrigeable)
+  const carbuVidange = Number(document.getElementById('fp-carbu')?.value||0);
+  const primeRendement = isAdmin ? 0 : commission - salBase - depensesCommercial;
   const brut        = salBase + primeRendement + primeMotivation + primeHebdo + primeTotal;
   const retCNSS     = brut * cnss;
   const retITS      = brut * its;
-  const totalRetenues = retCNSS + retITS + avance + dettes + caution + manquant + epargne;
+  const totalRetenues = retCNSS + retITS + avance + dettes + caution + manquant + epargne + carbuVidange;
   const net         = brut - totalRetenues;
 
   const moisNoms = ['Janvier','Février','Mars','Avril','Mai','Juin','Juillet','Août','Septembre','Octobre','Novembre','Décembre'];
@@ -2336,9 +2417,10 @@ window.exportFichePaieCSV = function(){
     ['Période', `${moisNoms[parseInt(month)-1]} ${year}`],
     [],
     ['Désignation','Montant (FCFA)'],
-    ['Collecte du mois', collecte],
+    ['Type de personnel', isAdmin ? 'Administration' : 'Commercial'],
+    ...(isAdmin ? [] : [['Collecte du mois', collecte]]),
     ['Salaire de base', Math.round(salBase)],
-    [`Prime sur rendement (Commission ${(taux*100).toFixed(1)}% - Salaire de base - Dépenses commercial)`, Math.round(primeRendement)],
+    ...(isAdmin ? [] : [[`Prime sur rendement (Commission ${(taux*100).toFixed(1)}% - Salaire de base - Dépenses hors carburant/vidange)`, Math.round(primeRendement)]]),
     ['Prime de motivation', Math.round(primeMotivation)],
     ['Primes hebdomadaires', Math.round(primeHebdo)],
     ['Prime exceptionnelle', Math.round(primeTotal)],
@@ -2351,6 +2433,7 @@ window.exportFichePaieCSV = function(){
     ['Caution et garantie', -Math.round(caution)],
     ['Épargne', -Math.round(epargne)],
     ['Manquant', -Math.round(manquant)],
+    ['Carburation / vidange', -Math.round(carbuVidange)],
     ['TOTAL RETENUES', -Math.round(totalRetenues)],
     [],
     ['NET À PAYER', Math.round(net)],
@@ -2358,7 +2441,7 @@ window.exportFichePaieCSV = function(){
   const csv = rows.map(r=>r.map(v=>'"'+String(v||'').replace(/"/g,'""')+'"').join(';')).join('\n');
   const a = document.createElement('a');
   a.href = 'data:text/csv;charset=utf-8,\uFEFF'+encodeURIComponent(csv);
-  a.download = `fiche_paie_${nomComm.replace(/\s+/g,'_')}_${key}.csv`;
+  a.download = `fiche_paie_${nomComm.replace(/[^\p{L}\p{N}]+/gu,'_')}_${key}.csv`;
   a.click();
   notify('Export CSV fiche de paie ✓');
 };
