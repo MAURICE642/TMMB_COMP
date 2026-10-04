@@ -903,6 +903,80 @@ function injectDemoData(){
 }
 
 /* ═══════════════════════════════════════════════════
+   LONGUES LISTES : affichage par paquets + sections repliables
+   ---------------------------------------------------
+   - Les tableaux longs affichent LIST_PAGE lignes, puis « Afficher plus » /
+     « Tout afficher ». Les TOTAUX et indicateurs portent toujours sur
+     l'ensemble filtré, pas seulement sur les lignes affichées.
+   - Le nombre affiché revient à LIST_PAGE dès qu'un filtre change.
+   - À l'impression : toutes les lignes filtrées et toutes les sections
+     repliées sont imprimées, puis l'écran revient à son état.
+═══════════════════════════════════════════════════ */
+const LIST_PAGE = 200;
+const _listLimit = {}, _listSig = {};
+let _printAll = false;
+
+function _listLimitFor(key, signature){
+  if(_listSig[key] !== signature){ _listSig[key] = signature; _listLimit[key] = LIST_PAGE; }
+  return _printAll ? Infinity : (_listLimit[key] || LIST_PAGE);
+}
+window.listShowMore = function(key, all){
+  _listLimit[key] = all ? Infinity : (_listLimit[key] || LIST_PAGE) + LIST_PAGE;
+  renderPg(curPg);
+};
+function _listMoreRow(key, shown, total, colspan){
+  if(shown >= total) return '';
+  return `<tr class="no-print"><td colspan="${colspan}" style="text-align:center;padding:12px;color:var(--muted);font-size:12px;">
+    ${shown.toLocaleString('fr-FR')} ligne(s) affichée(s) sur ${total.toLocaleString('fr-FR')}
+    <button class="btn btn-ghost btn-xs" style="margin-left:10px;" onclick="listShowMore('${key}')">Afficher ${Math.min(LIST_PAGE, total-shown)} de plus</button>
+    <button class="btn btn-ghost btn-xs" style="margin-left:6px;" onclick="listShowMore('${key}', true)">Tout afficher</button>
+  </td></tr>`;
+}
+function _setCount(id, n){ const el = document.getElementById(id); if(el) el.textContent = `(${Number(n).toLocaleString('fr-FR')})`; }
+
+/* Filtre « du / au » : renvoie {du, au, erreur}. Dates au format AAAA-MM-JJ. */
+function _dateRange(prefix){
+  const du = document.getElementById(prefix+'-du')?.value || '';
+  const au = document.getElementById(prefix+'-au')?.value || '';
+  return { du, au, actif: !!(du || au), erreur: (du && au && du > au) ? 'La date « du » est après la date « au ».' : '' };
+}
+const _inRange = (d, rg) => !!d && (!rg.du || d >= rg.du) && (!rg.au || d <= rg.au);
+window.clearDateRange = function(prefix){
+  ['-du','-au'].forEach(k=>{ const el = document.getElementById(prefix+k); if(el) el.value = ''; });
+  renderPg(curPg);
+};
+/* Toutes les entrées d'un index mensuel (Map 'AAAA-MM' -> [...]) comprises dans la plage. */
+function _rangeFromMonthly(map, rg){
+  const m1 = rg.du ? rg.du.slice(0,7) : '', m2 = rg.au ? rg.au.slice(0,7) : '9999-99';
+  let out = [];
+  map.forEach((arr, k)=>{ if(k >= m1 && k <= m2) out = out.concat(arr.filter(x=>_inRange(x.date, rg))); });
+  return out;
+}
+
+/* Sections repliables (<details class="coll">) : état mémorisé sur cet appareil. */
+function _initCollapsibles(){
+  document.querySelectorAll('details.coll[id]').forEach(d=>{
+    try{ const v = localStorage.getItem('compta_coll_'+d.id); if(v === '0') d.open = false; }catch(e){}
+    d.addEventListener('toggle', ()=>{
+      if(d.dataset.printing) return;
+      try{ localStorage.setItem('compta_coll_'+d.id, d.open ? '1' : '0'); }catch(e){}
+    });
+  });
+}
+window.addEventListener('beforeprint', ()=>{
+  _printAll = true;
+  document.querySelectorAll('details.coll').forEach(d=>{ if(!d.open){ d.dataset.printing = '1'; d.open = true; } });
+  try{ if(curPg) renderPg(curPg); }catch(e){}
+});
+window.addEventListener('afterprint', ()=>{
+  _printAll = false;
+  document.querySelectorAll('details.coll[data-printing]').forEach(d=>{ d.open = false; delete d.dataset.printing; });
+  try{ if(curPg) renderPg(curPg); }catch(e){}
+});
+if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', _initCollapsibles);
+else _initCollapsibles();
+
+/* ═══════════════════════════════════════════════════
    NAVIGATION
 ═══════════════════════════════════════════════════ */
 const PAGE_TITLES = {
@@ -1142,8 +1216,16 @@ window.renderCharges = function(){
   const cat    = document.getElementById('ch-cat')?.value||'';
   const search = (document.getElementById('ch-search')?.value||'').toLowerCase();
 
+  const rg = _dateRange('ch');
+  const errEl = document.getElementById('ch-range-err');
+  if(errEl){ errEl.textContent = rg.erreur; errEl.style.display = rg.erreur ? 'block' : 'none'; }
+  const monthEl = document.getElementById('ch-month');
+  if(monthEl){ monthEl.disabled = rg.actif; monthEl.title = rg.actif ? 'Ignoré : la plage « du / au » est utilisée' : ''; }
+
   let list = [...CHARGES];
-  if(month) list=list.filter(c=>c.date&&c.date.startsWith(month));
+  if(rg.erreur) list = [];
+  else if(rg.actif) list = list.filter(c=>_inRange(c.date, rg));   // la plage remplace le mois
+  else if(month) list=list.filter(c=>c.date&&c.date.startsWith(month));
   if(cat)   list=list.filter(c=>c.categorie===cat);
   if(search) list=list.filter(c=>(c.libelle||'').toLowerCase().includes(search)||(c.ref||'').toLowerCase().includes(search));
   list.sort((a,b)=>(b.date||'').localeCompare(a.date||''));
@@ -1158,9 +1240,12 @@ window.renderCharges = function(){
     <div class="kpi-card kc-purple"><div class="kpi-lbl">Nb d'écritures</div><div class="kpi-val kv-purple">${list.length}</div></div>
     <div class="kpi-card kc-yellow"><div class="kpi-lbl">Catégories</div><div class="kpi-val kv-yellow">${nbCats}</div></div>`;
 
+  _setCount('ch-count', list.length);
+  const limit = _listLimitFor('charges', [month, cat, search, rg.du, rg.au, list.length].join('|'));
+  const shown = list.slice(0, limit);
   document.getElementById('tb-charges').innerHTML=list.length===0
-    ? `<tr><td colspan="8" class="emp">Aucune charge trouvée</td></tr>`
-    : list.map(c=>{
+    ? `<tr><td colspan="9" class="emp">${rg.erreur ? esc(rg.erreur) : 'Aucune charge trouvée'}</td></tr>`
+    : shown.map(c=>{
       const period = (c.date||'').substring(0,7);
       const locked = isPeriodeLocked(period);
       const pjCell = c.pj
@@ -1181,7 +1266,7 @@ window.renderCharges = function(){
           ${(window._userRole==='admin')?`<button class="btn btn-danger btn-xs" onclick="deleteCharge('${esc(c._id)}')" style="margin-left:4px;">🗑</button>`:''}`}
         </td>
       </tr>`;
-    }).join('');
+    }).join('') + _listMoreRow('charges', shown.length, list.length, 9);
 };
 
 window.openModalCharge = function(id=null){
@@ -1497,16 +1582,23 @@ window.renderResultat = function(){
 };
 let _jrnSolde = 0;
 
-window.renderJournal = function(){
+/* Écritures du journal selon les filtres (mois OU plage du/au, type).
+   Utilisé par l'affichage ET l'export CSV (l'export ne dépend plus des lignes
+   affichées à l'écran, qui peuvent être limitées). */
+function _journalData(){
   const month  = document.getElementById('jrn-month')?.value||CUR_MONTH;
   const typeF  = document.getElementById('jrn-type')?.value||'';
+  const rg     = _dateRange('jrn');
+  // Plage du/au renseignée : elle remplace le mois (peut couvrir plusieurs mois)
+  const src = map => rg.actif ? _rangeFromMonthly(map, rg) : _monthlyRange(map, ...month.split('-'));
 
   // Construire les écritures
   const ecritures = [];
   let pieceNum = 1;
+  if(rg.erreur) return { month, typeF, rg, filtered:[] };
 
   // Paiements → PRODUIT
-  _monthlyRange(IDX.paiementsByMonth, ...month.split('-'))
+  src(IDX.paiementsByMonth)
     .forEach(p=>{
       const com = IDX.commerciauxById.get(p.commercialId)||{nom:'?'};
       const cl  = IDX.clientsById.get(p.clientId)||{nom:'?'};
@@ -1514,7 +1606,7 @@ window.renderJournal = function(){
     });
 
   // Livraisons → PRODUIT (marge uniquement, statut livré)
-  _monthlyRange(IDX.livraisonsByMonth, ...month.split('-'))
+  src(IDX.livraisonsByMonth)
     .filter(l=>l.statut!=='en_attente')
     .forEach(l=>{
       const art = IDX.articlesById.get(l.articleId)||{nom:'?',pa:0};
@@ -1524,21 +1616,30 @@ window.renderJournal = function(){
     });
 
   // Adhésions → PRODUIT
-  _monthlyRange(IDX.adhesionsByMonth, ...month.split('-'))
+  src(IDX.adhesionsByMonth)
     .forEach(a=>{
       const cl  = IDX.clientsById.get(a.clientId)||{nom:'?'};
       ecritures.push({date:a.date,piece:'ADH-'+String(pieceNum++).padStart(4,'0'),type:'adhesion',libelle:`Adhésion – ${cl.nom}`,debit:0,credit:Number(a.montant||0)});
     });
 
   // Charges → CHARGE (utilise pieceNum stocké si disponible)
-  _monthlyRange(IDX.chargesByMonth, ...month.split('-'))
+  src(IDX.chargesByMonth)
     .forEach(c=>{
       ecritures.push({date:c.date,piece:c.pieceNum||c.ref||'CHG-'+String(pieceNum++).padStart(4,'0'),type:'charge',libelle:`[${c.categorie}] ${c.libelle}`,debit:Number(c.montant||0),credit:0});
     });
 
-  ecritures.sort((a,b)=>a.date.localeCompare(b.date));
+  ecritures.sort((a,b)=>(a.date||'').localeCompare(b.date||''));
 
-  let filtered = typeF ? ecritures.filter(e=>e.type===typeF) : ecritures;
+  const filtered = typeF ? ecritures.filter(e=>e.type===typeF) : ecritures;
+  return { month, typeF, rg, filtered };
+}
+
+window.renderJournal = function(){
+  const { month, typeF, rg, filtered } = _journalData();
+  const errEl = document.getElementById('jrn-range-err');
+  if(errEl){ errEl.textContent = rg.erreur; errEl.style.display = rg.erreur ? 'block' : 'none'; }
+  const monthEl = document.getElementById('jrn-month');
+  if(monthEl){ monthEl.disabled = rg.actif; monthEl.title = rg.actif ? 'Ignoré : la plage « du / au » est utilisée' : ''; }
   let solde = 0;
   let totalDebit = 0, totalCredit = 0;
   const TYPE_LABELS={recette:'Recette',livraison:'Livraison',adhesion:'Adhésion',charge:'Charge'};
@@ -1556,18 +1657,21 @@ window.renderJournal = function(){
   // Update print header period
   const moisNoms=['Jan','Fév','Mar','Avr','Mai','Jun','Jul','Aoû','Sep','Oct','Nov','Déc'];
   const [y,m] = month.split('-');
-  const periodLabel = m ? `${moisNoms[parseInt(m)-1]} ${y}` : `Exercice ${y}`;
+  const fr = d => d ? d.split('-').reverse().join('/') : '…';
+  const periodLabel = rg.actif ? `du ${fr(rg.du)} au ${fr(rg.au)}` : (m ? `${moisNoms[parseInt(m)-1]} ${y}` : `Exercice ${y}`);
   const php = document.getElementById('ph-journaux-period');
   const phd = document.getElementById('ph-journaux-date');
   if(php) php.textContent = `Période : ${periodLabel}`;
   if(phd) phd.textContent = `Édité le ${new Date().toLocaleDateString('fr-FR')}`;
 
   let cumulSolde = 0;
+  _setCount('jrn-count', filtered.length);
+  const limit = _listLimitFor('journal', [month, typeF, rg.du, rg.au, filtered.length].join('|'));
+  const shown = filtered.slice(0, limit);
   document.getElementById('tb-journal').innerHTML=filtered.length===0
-    ? `<tr><td colspan="7" class="emp">Aucune écriture pour cette période</td></tr>`
-    : filtered.map((e,i)=>{
+    ? `<tr><td colspan="7" class="emp">${rg.erreur ? esc(rg.erreur) : 'Aucune écriture pour cette période'}</td></tr>`
+    : shown.map((e,i)=>{
         cumulSolde += e.credit - e.debit;
-        const isLast = i===filtered.length-1;
         return `<tr class="${e.debit>0?'tr-neg':''}">
           <td class="fw6">${esc(e.date)}</td>
           <td class="tm" style="font-size:11px;"><span class="piece-num" style="font-size:10px;">${esc(e.piece)}</span></td>
@@ -1577,9 +1681,9 @@ window.renderJournal = function(){
           <td class="${e.credit>0?'amt-pos':''}">${e.credit>0?fmt(e.credit):'—'}</td>
           <td style="font-weight:700;color:${cumulSolde>=0?'var(--accent2)':'var(--red)'};">${fmt(cumulSolde)}</td>
         </tr>`;
-      }).join('') +
+      }).join('') + _listMoreRow('journal', shown.length, filtered.length, 7) +
       `<tr style="background:var(--surface3);font-weight:800;">
-        <td colspan="4" style="color:var(--muted);font-size:12px;padding:8px 12px;">TOTAUX PÉRIODE</td>
+        <td colspan="4" style="color:var(--muted);font-size:12px;padding:8px 12px;">TOTAUX PÉRIODE (${filtered.length.toLocaleString('fr-FR')} écritures)</td>
         <td class="amt-neg">${fmt(totalDebit)}</td>
         <td class="amt-pos">${fmt(totalCredit)}</td>
         <td style="font-weight:800;color:${soldeNet>=0?'var(--accent2)':'var(--red)'};">${fmt(soldeNet)}</td>
@@ -1587,16 +1691,18 @@ window.renderJournal = function(){
 };
 
 window.exportJournal = function(){
-  const month = document.getElementById('jrn-month')?.value||CUR_MONTH;
-  const rows = [['Date','N° Pièce','Type','Libellé','Débit','Crédit']];
-  document.querySelectorAll('#tb-journal tr').forEach(tr=>{
-    const tds = [...tr.querySelectorAll('td')];
-    if(tds.length>=6) rows.push(tds.slice(0,6).map(td=>'"'+td.textContent.trim().replace(/"/g,'""')+'"'));
-  });
+  // [LISTES LONGUES] Export depuis les données filtrées (toutes les lignes),
+  // et non plus depuis le tableau affiché, qui peut être limité à 200 lignes.
+  const { month, filtered, rg } = _journalData();
+  if(rg.erreur){ notify(rg.erreur, 'err'); return; }
+  const TYPE_LABELS={recette:'Recette',livraison:'Livraison',adhesion:'Adhésion',charge:'Charge'};
+  const q = v => '"'+String(v??'').replace(/"/g,'""')+'"';
+  const rows = [['Date','N° Pièce','Type','Libellé','Débit','Crédit'].map(q)];
+  filtered.forEach(e=>rows.push([e.date, e.piece, TYPE_LABELS[e.type]||e.type, e.libelle, Math.round(e.debit), Math.round(e.credit)].map(q)));
   const csv = rows.map(r=>r.join(';')).join('\n');
   const a = document.createElement('a');
   a.href = 'data:text/csv;charset=utf-8,\uFEFF'+encodeURIComponent(csv);
-  a.download = `journal_${month}.csv`;
+  a.download = rg.actif ? `journal_${rg.du||'debut'}_${rg.au||'fin'}.csv` : `journal_${month}.csv`;
   a.click();
   notify('Journal exporté ✓');
 };
@@ -1954,17 +2060,21 @@ window.renderProjection = function(){
   const totPaye  = rows.reduce((s,r)=>s+r.totalPaye,0);
   const totMarge = rows.reduce((s,r)=>s+r.margeClient,0);
 
+  _setCount('proj-count', rows.length);
+  const limit = _listLimitFor('projection', [year, month, search, rows.length].join('|'));
+  const shownRows = rows.slice(0, limit);
   document.getElementById('tb-projection').innerHTML = rows.length===0
     ? `<tr><td colspan="7" class="emp">${clientsNonLivresIds.length===0?'✅ Tous les clients de la période ont été livrés !':'Aucun résultat pour cette recherche.'}</td></tr>`
-    : rows.map((r,i)=>`<tr>
+    : shownRows.map((r,i)=>`<tr>
         <td class="tm">${i+1}</td>
-        <td class="fw6">${r.nomClient}</td>
-        <td class="tm">${r.nomComm}</td>
+        <td class="fw6">${esc(r.nomClient)}</td>
+        <td class="tm">${esc(r.nomComm)}</td>
         <td class="amt-pos">${fmt(r.totalPaye)}</td>
         <td style="color:var(--accent3);font-weight:700;">${fmt(r.margeClient)}</td>
         <td>${r.livraisonLabel}</td>
         <td class="tm">${r.nbPaiements}</td>
       </tr>`).join('')
+    + _listMoreRow('projection', shownRows.length, rows.length, 7)
     + `<tr style="background:#0e1427;font-weight:700;border-top:2px solid var(--border2);">
         <td colspan="3" style="padding:10px 14px;font-size:12px;color:var(--muted);">TOTAL (${rows.length} clients affichés)</td>
         <td class="amt-pos">${fmt(totPaye)}</td>

@@ -213,8 +213,16 @@
             <option value="Divers">Divers</option>
           </select>
           <input type="text" id="ch-search" class="form-control" placeholder="Rechercher…" style="font-size:12px;" oninput="renderCharges()">
+          <span class="date-range" title="Plage de dates : remplace le mois si elle est renseignée">
+            <label for="ch-du">Du</label><input type="date" id="ch-du" class="form-control" style="font-size:12px;" onchange="renderCharges()">
+            <label for="ch-au">au</label><input type="date" id="ch-au" class="form-control" style="font-size:12px;" onchange="renderCharges()">
+            <button type="button" class="btn btn-ghost btn-xs" onclick="clearDateRange('ch')" title="Effacer la plage">✕</button>
+          </span>
         </div>
+        <div class="alert alert-danger" id="ch-range-err" style="display:none;"></div>
         <div class="kpi-row kpi-3" id="ch-kpi"></div>
+        <details class="coll" id="coll-charges" open>
+        <summary class="coll-sum"><span class="coll-title">📋 Liste des charges <span class="coll-count" id="ch-count"></span></span><span class="coll-hint">cliquer pour replier / déplier</span></summary>
         <div class="tw">
           <table>
             <thead><tr>
@@ -223,6 +231,7 @@
             <tbody id="tb-charges"></tbody>
           </table>
         </div>
+        </details>
       </div>
 
       <!-- ════════ PAGE : BILAN ════════ -->
@@ -305,8 +314,16 @@
             <option value="adhesion">Adhésions</option>
             <option value="charge">Charges</option>
           </select>
+          <span class="date-range" title="Plage de dates : remplace le mois si elle est renseignée">
+            <label for="jrn-du">Du</label><input type="date" id="jrn-du" class="form-control" style="font-size:12px;" onchange="renderJournal()">
+            <label for="jrn-au">au</label><input type="date" id="jrn-au" class="form-control" style="font-size:12px;" onchange="renderJournal()">
+            <button type="button" class="btn btn-ghost btn-xs" onclick="clearDateRange('jrn')" title="Effacer la plage">✕</button>
+          </span>
         </div>
+        <div class="alert alert-danger" id="jrn-range-err" style="display:none;"></div>
         <div class="kpi-row kpi-3" id="jrn-kpi"></div>
+        <details class="coll" id="coll-journal" open>
+        <summary class="coll-sum"><span class="coll-title">📒 Écritures <span class="coll-count" id="jrn-count"></span></span><span class="coll-hint">cliquer pour replier / déplier</span></summary>
         <div class="tw">
           <table>
             <thead><tr>
@@ -315,6 +332,7 @@
             <tbody id="tb-journal"></tbody>
           </table>
         </div>
+        </details>
       </div>
 
       <!-- ════════ PAGE : TRÉSORERIE ════════ -->
@@ -452,6 +470,8 @@
         </div>
 
         <!-- Tableau -->
+        <details class="coll" id="coll-salaires" open>
+        <summary class="coll-sum"><span class="coll-title">💸 Salaires des commerciaux</span><span class="coll-hint">cliquer pour replier / déplier</span></summary>
         <div class="sal-table-wrap">
           <table>
             <thead>
@@ -468,6 +488,7 @@
             <tbody id="tb-salaires"></tbody>
           </table>
         </div>
+        </details>
         <div style="font-size:11px;color:var(--muted);text-align:right;margin-top:-10px;margin-bottom:18px;" id="sal-import-notice"></div>
       </div>
 
@@ -631,6 +652,8 @@
           <div class="sec-title" style="font-size:13px;">👥 Détail des clients non livrés</div>
           <input type="text" id="proj-search" class="form-control" placeholder="Rechercher un client…" style="font-size:12px;width:200px;" oninput="renderProjection()">
         </div>
+        <details class="coll" id="coll-projection" open>
+        <summary class="coll-sum"><span class="coll-title">👥 Clients non livrés <span class="coll-count" id="proj-count"></span></span><span class="coll-hint">cliquer pour replier / déplier</span></summary>
         <div class="tw">
           <table>
             <thead><tr>
@@ -645,6 +668,7 @@
             <tbody id="tb-projection"></tbody>
           </table>
         </div>
+        </details>
         <div style="font-size:11px;color:var(--muted);margin-top:-10px;margin-bottom:18px;" id="proj-footer-note"></div>
       </div>
 
@@ -723,10 +747,12 @@
         </div>
 
         <!-- Liste des comptes -->
+        <details class="coll" id="coll-comptes" open>
+        <summary class="coll-sum"><span class="coll-title">📋 Comptes enregistrés</span><span class="coll-hint">cliquer pour replier / déplier</span></summary>
         <div class="card">
-          <div class="card-title">📋 Comptes enregistrés</div>
           <div class="account-list" id="account-list"></div>
         </div>
+        </details>
       </div>
 
     </div><!-- /content -->
