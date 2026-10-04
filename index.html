@@ -96,9 +96,13 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="23" y1="11" x2="17" y2="11"/><line x1="20" y1="8" x2="20" y2="14"/></svg>
       Auto-Salaire
     </div>
-    <div class="nav-item" id="nav-fiche-paie" onclick="go('fiche-paie')">
+    <div class="nav-item" id="nav-fiche-paie" onclick="ouvrirFichePaie('commercial')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="2" width="16" height="20" rx="2"/><line x1="8" y1="7" x2="16" y2="7"/><line x1="8" y1="11" x2="16" y2="11"/><line x1="8" y1="15" x2="12" y2="15"/></svg>
       Fiche de paie
+    </div>
+    <div class="nav-item" id="nav-paye-resp" onclick="ouvrirFichePaie('admin')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="7" r="4"/><path d="M5.5 21v-2a6.5 6.5 0 0 1 13 0v2"/><path d="M12 11v3"/></svg>
+      Payer un responsable
     </div>
     <div class="nav-item" id="nav-projection" onclick="go('projection')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/><path d="M16 2l4 4-4 4"/></svg>
@@ -481,10 +485,21 @@
         <!-- Barre de paramètres -->
         <div class="fp-toolbar no-print">
           <div style="display:flex;flex-direction:column;gap:4px;">
+            <label>Type de personnel</label>
+            <select id="fp-type" onchange="onFpTypeChange()">
+              <option value="commercial">Commercial</option>
+              <option value="admin">Responsable / administration</option>
+            </select>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:4px;" id="fp-wrap-commercial">
             <label>Commercial</label>
             <select id="fp-commercial" onchange="renderFichePaie()">
               <option value="">— Sélectionner —</option>
             </select>
+          </div>
+          <div style="display:none;flex-direction:column;gap:4px;" id="fp-wrap-admin">
+            <label>Nom &amp; prénoms du responsable</label>
+            <input type="text" id="fp-nom-admin" placeholder="Ex. : AGOSSOU Marie" maxlength="80" style="width:190px;" oninput="renderFichePaie()">
           </div>
           <div style="display:flex;flex-direction:column;gap:4px;">
             <label>Mois</label>
@@ -501,11 +516,11 @@
             <label>Année</label>
             <select id="fp-year" onchange="renderFichePaie()"></select>
           </div>
-          <div style="display:flex;flex-direction:column;gap:4px;">
+          <div style="display:flex;flex-direction:column;gap:4px;" id="fp-wrap-taux">
             <label>Taux commission (%)</label>
             <input type="number" id="fp-taux" value="7" min="0" max="100" step="0.5" style="width:80px;" oninput="renderFichePaie()">
           </div>
-          <div style="display:flex;flex-direction:column;gap:4px;">
+          <div style="display:flex;flex-direction:column;gap:4px;" id="fp-wrap-prime">
             <label>Prime exceptionnelle (FCFA)</label>
             <input type="number" id="fp-prime" value="0" min="0" style="width:140px;" oninput="renderFichePaie()">
           </div>
@@ -513,11 +528,21 @@
             <label>CNSS (%)</label>
             <input type="number" id="fp-cnss" value="0" min="0" max="50" step="0.1" style="width:80px;" oninput="renderFichePaie()">
           </div>
-          <div style="display:flex;flex-direction:column;gap:4px;">
+          <div style="display:flex;flex-direction:column;gap:4px;" id="fp-wrap-its">
             <label>ITS / IR (%)</label>
             <input type="number" id="fp-its" value="0" min="0" max="50" step="0.1" style="width:80px;" oninput="renderFichePaie()">
           </div>
-          <div style="display:flex;flex-direction:column;gap:4px;">
+          <div style="display:none;flex-direction:column;gap:4px;" id="fp-wrap-poste-resp">
+            <label>Fonction du responsable</label>
+            <select id="fp-poste-resp" onchange="onFpPosteRespChange()">
+              <option value="Chef d'agence">Chef d'agence</option>
+              <option value="Secrétaire">Secrétaire</option>
+              <option value="Contrôleur">Contrôleur</option>
+              <option value="Gestionnaire">Gestionnaire</option>
+              <option value="autre">Autre (saisir)…</option>
+            </select>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:4px;" id="fp-wrap-poste">
             <label>Poste / Fonction</label>
             <input type="text" id="fp-poste" value="Agent Commercial" style="width:150px;padding:7px 11px;background:var(--surface2);border:1px solid var(--border);border-radius:7px;color:var(--text);font-size:13px;" oninput="renderFichePaie()">
           </div>
@@ -548,6 +573,10 @@
           <div style="display:flex;flex-direction:column;gap:4px;">
             <label>Manquant (FCFA)</label>
             <input type="number" id="fp-manquant" value="0" min="0" style="width:140px;" oninput="renderFichePaie()">
+          </div>
+          <div style="display:flex;flex-direction:column;gap:4px;">
+            <label>Carburation / vidange (FCFA)</label>
+            <input type="number" id="fp-carbu" value="0" min="0" style="width:140px;" oninput="renderFichePaie()">
           </div>
           <div style="display:flex;flex-direction:column;gap:4px;">
             <label>Épargne (FCFA)</label>

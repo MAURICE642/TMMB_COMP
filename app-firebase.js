@@ -908,7 +908,7 @@ function injectDemoData(){
 const PAGE_TITLES = {
   dashboard:'Vue d\'ensemble',charges:'Charges & Dépenses',bilan:'Bilan Comptable',
   resultat:'Compte de Résultat',journaux:'Journal des écritures',import:'Synchronisation',
-  salaires:'Auto-Salaire Commerciaux','fiche-paie':'Fiche de Paie',projection:'Projection livraisons',
+  salaires:'Auto-Salaire Commerciaux','fiche-paie':'Fiche de Paie','paye-resp':'Payer un responsable',projection:'Projection livraisons',
   comptes:'Gestion des comptes',tresorerie:'Tableau de Trésorerie',periodes:'Verrouillage des périodes',
   autonomie:'Autonomie de l\'entreprise'
 };
@@ -2068,19 +2068,69 @@ function populateFpCommercials(){
 const FP_SALBASE_DEFAUT = { commercial: 45000, admin: 60000 };
 const FP_POSTE_DEFAUT   = { commercial: 'Agent Commercial', admin: '' };
 
+const _fpShow = (id, on) => { const el = document.getElementById(id); if(el) el.style.display = on ? 'flex' : 'none'; };
+
 window.onFpTypeChange = function(){
   const type = document.getElementById('fp-type')?.value || 'commercial';
   const isAdmin = type === 'admin';
-  const show = (id, on) => { const el = document.getElementById(id); if(el) el.style.display = on ? 'flex' : 'none'; };
-  show('fp-wrap-commercial', !isAdmin);
-  show('fp-wrap-taux', !isAdmin);
-  show('fp-wrap-admin', isAdmin);
+  _fpShow('fp-wrap-commercial', !isAdmin);
+  _fpShow('fp-wrap-taux', !isAdmin);
+  _fpShow('fp-wrap-admin', isAdmin);
+  // Responsable : tout est saisi, pas de recette ni de taux.
+  // Prime exceptionnelle et ITS sont masquées et remises à 0, car ces deux
+  // montants entrent dans le calcul SANS ligne imprimée sur la fiche (défaut
+  // existant signalé) : un montant invisible fausserait la fiche d'un responsable.
+  _fpShow('fp-wrap-prime', !isAdmin);
+  _fpShow('fp-wrap-its', !isAdmin);
+  _fpShow('fp-wrap-poste-resp', isAdmin);
+  if(isAdmin){
+    ['fp-prime','fp-its'].forEach(id=>{ const el = document.getElementById(id); if(el) el.value = 0; });
+  }
   const sb = document.getElementById('fp-salbase'); if(sb) sb.value = FP_SALBASE_DEFAUT[type];
   const cv = document.getElementById('fp-carbu'); if(cv) cv.value = 0;
   _fpCarbuKey = null;
   const po = document.getElementById('fp-poste');
-  if(po){ po.value = FP_POSTE_DEFAUT[type]; po.placeholder = isAdmin ? 'Ex. : Secrétaire' : ''; }
+  if(po){ po.value = FP_POSTE_DEFAUT[type]; po.placeholder = isAdmin ? 'Ex. : Comptable' : ''; }
+  // Titre et menu actif selon le mode
+  const tt = document.getElementById('topbar-title');
+  if(tt && curPg === 'fiche-paie') tt.textContent = isAdmin ? 'Payer un responsable' : 'Fiche de Paie';
+  document.getElementById('nav-fiche-paie')?.classList.toggle('active', curPg === 'fiche-paie' && !isAdmin);
+  document.getElementById('nav-paye-resp')?.classList.toggle('active', curPg === 'fiche-paie' && isAdmin);
+  window.onFpPosteRespChange();   // affiche/masque la saisie libre de la fonction, puis recalcule
+};
+
+/* Liste des fonctions : « Autre » fait apparaître la saisie libre. */
+window.onFpPosteRespChange = function(){
+  const isAdmin = (document.getElementById('fp-type')?.value || 'commercial') === 'admin';
+  const autre = (document.getElementById('fp-poste-resp')?.value || '') === 'autre';
+  _fpShow('fp-wrap-poste', !isAdmin || autre);
   renderFichePaie();
+};
+
+/* Fonction imprimée sur la fiche. */
+function _fpPoste(){
+  const isAdmin = (document.getElementById('fp-type')?.value || 'commercial') === 'admin';
+  const sel = document.getElementById('fp-poste-resp')?.value || '';
+  if(isAdmin && sel && sel !== 'autre') return sel;
+  return document.getElementById('fp-poste')?.value || (isAdmin ? '' : 'Commercial');
+}
+
+/* Entrées du menu « Fiche de paie » et « Payer un responsable » : même page,
+   mode différent. */
+window.ouvrirFichePaie = function(type){
+  go('fiche-paie');
+  const sel = document.getElementById('fp-type');
+  if(!sel) return;
+  if(sel.value !== type){
+    sel.value = type;
+    onFpTypeChange();          // change de mode : valeurs par défaut + titre + menu
+  } else {
+    // Même mode : on garde la saisie en cours, on met juste à jour titre et menu
+    const isAdmin = type === 'admin';
+    const tt = document.getElementById('topbar-title'); if(tt) tt.textContent = isAdmin ? 'Payer un responsable' : 'Fiche de Paie';
+    document.getElementById('nav-fiche-paie')?.classList.toggle('active', !isAdmin);
+    document.getElementById('nav-paye-resp')?.classList.toggle('active', isAdmin);
+  }
 };
 
 /* ═══ DÉPENSES DU COMMERCIAL : séparation carburant/vidange ═══
@@ -2114,7 +2164,7 @@ function _fpPersonnel(){
   if(isAdmin){
     const nom = (document.getElementById('fp-nom-admin')?.value || '').trim();
     const initiales = nom.split(/\s+/).filter(Boolean).map(w=>w[0]).join('').toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,4) || 'X';
-    return { isAdmin, commId:'', nom, codeMatricule: 'ADM-' + initiales };
+    return { isAdmin, commId:'', nom, codeMatricule: 'RESP-' + initiales };
   }
   const commId = document.getElementById('fp-commercial')?.value || '';
   return { isAdmin, commId, nom:'', codeMatricule: commId.slice(-4).toUpperCase() };
@@ -2136,10 +2186,10 @@ window.renderFichePaie = function(){
   const primeEl = Number(document.getElementById('fp-prime')?.value||0);
   const cnss    = Number(document.getElementById('fp-cnss')?.value||0)/100;
   const its     = Number(document.getElementById('fp-its')?.value||0)/100;
-  const poste   = document.getElementById('fp-poste')?.value || 'Commercial';
+  const poste   = _fpPoste();
 
   if(isAdmin ? !pers.nom : !commId){
-    container.innerHTML = `<div style="text-align:center;padding:60px 0;color:var(--muted);font-size:14px;">👆 ${isAdmin ? 'Saisissez le nom du membre de l\'administration' : 'Sélectionnez un commercial'} pour générer la fiche de paie</div>`;
+    container.innerHTML = `<div style="text-align:center;padding:60px 0;color:var(--muted);font-size:14px;">👆 ${isAdmin ? 'Saisissez le nom du responsable' : 'Sélectionnez un commercial'} pour générer la fiche de paie</div>`;
     return;
   }
 
@@ -2379,7 +2429,7 @@ window.exportFichePaieCSV = function(){
   const prime   = Number(document.getElementById('fp-prime')?.value||0);
   const cnss    = Number(document.getElementById('fp-cnss')?.value||0)/100;
   const its     = Number(document.getElementById('fp-its')?.value||0)/100;
-  const poste   = document.getElementById('fp-poste')?.value || 'Commercial';
+  const poste   = _fpPoste();
   const salBase = Number(document.getElementById('fp-salbase')?.value||0);
   const primeMotivation = Number(document.getElementById('fp-primemotiv')?.value||0);
   const primeHebdo = Number(document.getElementById('fp-primehebdo')?.value||0);
