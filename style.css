@@ -50,6 +50,8 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--bg);colo
 .fp-off-table td{border:1px solid #333;padding:5px 10px;}
 .fp-off-table .fp-total-row td{font-weight:900;background:#e8e8e8;}
 .fp-off-table .fp-dash{color:#555;text-align:center;}
+.fp-off-table .fp-sub td{padding:3px 10px 3px 26px;font-size:10.5px;font-style:italic;color:#444;}
+.fp-off-table .fp-sub td.r{padding-right:10px;}
 
 /* NET À PAYER */
 .fp-net-off{border:2px solid #333;padding:7px 14px;margin:14px 0;font-size:12px;}
@@ -98,7 +100,7 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--bg);colo
   .fp-doc{ page:fichepaie; }
   /* Sélecteur renforcé : la règle mobile (@media max-width:860px, déclenchée par la
      largeur A4 à l'impression) imposait padding:14px et écrasait cette marge. */
-  #fp-container .fp-doc{ padding:12mm 14mm !important; margin:0 auto !important; }
+  #fp-container .fp-doc, #fp-archive .fp-doc{ padding:12mm 14mm !important; margin:0 auto !important; }
 }
 
 /* ═══════ PRINT HEADER (en-tête société sur états financiers) ═══════ */
@@ -412,6 +414,7 @@ html,body{height:100%;font-family:'DM Sans',sans-serif;background:var(--bg);colo
 .btn-ghost{background:var(--surface2);color:var(--text);border:1px solid var(--border);}
 .btn-ghost:hover{border-color:var(--accent);color:var(--accent);}
 .btn-sm{padding:6px 12px;font-size:12px;border-radius:6px;}
+.btn:disabled,.btn[disabled]{opacity:.4!important;cursor:not-allowed;filter:grayscale(.6);}
 .btn-xs{padding:3px 9px;font-size:11px;border-radius:5px;}
 
 /* Form */
@@ -527,6 +530,32 @@ details.coll[open] > .coll-sum::before{transform:rotate(90deg);}
 .filters select:disabled,.filters input:disabled{opacity:.45;cursor:not-allowed;}
 @media(max-width:860px){ .coll-hint{display:none;} .date-range{width:100%;} .date-range input[type=date]{flex:1;width:auto!important;} }
 @media print{ .coll-sum{display:none!important;} }
+
+/* ═══════════════════════════════════════════════════
+   CADRAN CARBURATION / VIDANGE (fiche de paie, écran seulement)
+═══════════════════════════════════════════════════ */
+.gauge-card{
+  display:flex;align-items:center;gap:22px;flex-wrap:wrap;
+  max-width:720px;margin:0 auto 14px;padding:14px 18px;
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+}
+.gauge-svg{width:200px;height:auto;flex-shrink:0;}
+.gz{fill:none;stroke-width:16;}
+.gz-vert{stroke:var(--accent2);} .gz-orange{stroke:var(--warn);} .gz-rouge{stroke:var(--danger);}
+.gauge-needle{stroke:var(--text);stroke-width:3;stroke-linecap:round;}
+.gauge-hub{fill:var(--text);}
+.gauge-tick{fill:var(--muted);font-size:10px;font-family:'DM Sans',sans-serif;}
+.gauge-info{flex:1;min-width:200px;}
+.gauge-title{font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin-bottom:4px;}
+.gauge-val{font-family:'Syne',sans-serif;font-weight:800;font-size:30px;line-height:1.1;}
+.gauge-state{font-size:12px;font-weight:700;margin-top:2px;}
+.g-vert{color:var(--accent2);} .g-orange{color:var(--warn);} .g-rouge{color:var(--danger);}
+.gauge-detail{font-size:12px;color:var(--muted);margin-top:6px;}
+.gauge-empty{font-size:13px;color:var(--text);margin:6px 0;}
+.gauge-seuil{display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);margin-top:8px;}
+.gauge-seuil input{width:64px;padding:4px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px;}
+@media(max-width:860px){ .gauge-card{justify-content:center;text-align:center;} .gauge-seuil input{width:64px!important;} }
+@media print{ .gauge-card{display:none!important;} }
 
 /* ═══════════════════════════════════════════════════
    PAGE-SPECIFIC COLORS

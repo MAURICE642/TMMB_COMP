@@ -221,6 +221,7 @@
         </div>
         <div class="alert alert-danger" id="ch-range-err" style="display:none;"></div>
         <div class="kpi-row kpi-3" id="ch-kpi"></div>
+        <div class="alert alert-warn" id="ch-doublons" style="display:none;"></div>
         <details class="coll" id="coll-charges" open>
         <summary class="coll-sum"><span class="coll-title">📋 Liste des charges <span class="coll-count" id="ch-count"></span></span><span class="coll-hint">cliquer pour replier / déplier</span></summary>
         <div class="tw">
@@ -231,6 +232,23 @@
             <tbody id="tb-charges"></tbody>
           </table>
         </div>
+        </details>
+
+        <details class="coll" id="coll-auto-charges" open>
+        <summary class="coll-sum"><span class="coll-title">⚙️ Charges automatiques — app TMMB et fiches payées <span class="coll-count" id="auto-count"></span></span><span class="coll-hint">lecture seule · mêmes filtres que ci-dessus</span></summary>
+        <div style="font-size:12px;margin:0 0 10px 2px;" id="auto-totaux"></div>
+        <div class="tw">
+          <table>
+            <thead><tr>
+              <th>Date</th><th>Source</th><th>Libellé</th><th>Catégorie</th><th>Comptée dans</th><th>Montant</th>
+            </tr></thead>
+            <tbody id="tb-auto-charges"></tbody>
+          </table>
+        </div>
+        <details class="coll no-print" id="coll-auto-controle">
+          <summary class="coll-sum"><span class="coll-title">🔎 Contrôle : ce qui est reconnu dans l'app TMMB</span><span class="coll-hint">à vérifier lors de la première utilisation</span></summary>
+          <div class="card" id="auto-controle"></div>
+        </details>
         </details>
       </div>
 
@@ -500,6 +518,7 @@
           <div style="display:flex;gap:8px;">
             <button class="btn btn-ghost btn-sm no-print" onclick="exportFichePaieCSV()">⬇️ Exporter CSV</button>
             <button class="btn btn-primary btn-sm no-print" onclick="window.print()">🖨️ Imprimer</button>
+            <button class="btn btn-success btn-sm no-print" id="btn-payer-fiche" onclick="payerFichePaie()" title="Fige la fiche, l'archive et enregistre le salaire brut en charge">💰 Payer et enregistrer</button>
           </div>
         </div>
 
@@ -605,12 +624,32 @@
           </div>
         </div>
 
+        <!-- Fiche payée consultée (remplace l'affichage courant, imprimable) -->
+        <div id="fp-archive" style="display:none;"></div>
+
         <!-- La fiche -->
         <div id="fp-container">
           <div style="text-align:center;padding:60px 0;color:var(--muted);font-size:14px;">
             👆 Sélectionnez un commercial pour générer la fiche de paie
           </div>
         </div>
+
+        <!-- Fiches payées -->
+        <details class="coll no-print" id="coll-fiches-payees" open style="margin-top:22px;">
+          <summary class="coll-sum"><span class="coll-title">📁 Fiches payées <span class="coll-count" id="fpp-count"></span></span><span class="coll-hint">consulter · réimprimer</span></summary>
+          <div class="filters">
+            <input type="month" id="fpp-month" class="form-control" style="font-size:12px;" onchange="renderFichesPayees()" title="Période de paie">
+            <input type="text" id="fpp-search" class="form-control" placeholder="Rechercher un nom, une fonction…" style="font-size:12px;" oninput="renderFichesPayees()">
+            <button type="button" class="btn btn-ghost btn-xs" onclick="document.getElementById('fpp-month').value='';document.getElementById('fpp-search').value='';renderFichesPayees();">✕ Tout afficher</button>
+          </div>
+          <div style="font-size:12px;margin:0 0 10px 2px;" id="fpp-totaux"></div>
+          <div class="tw">
+            <table>
+              <thead><tr><th>Période</th><th>Salarié</th><th>Type · fonction</th><th>Brut</th><th>Net</th><th>Payée le / par</th><th>Statut</th><th></th></tr></thead>
+              <tbody id="tb-fiches-payees"></tbody>
+            </table>
+          </div>
+        </details>
       </div>
 
       <!-- ════════ PAGE : PROJECTION ════════ -->

@@ -14,7 +14,7 @@ const CUR_MONTH = TODAY.slice(0,7);
 // Données lues depuis TRIOMPHANT (lecture seule)
 let TDB = {
   agences:[], commerciaux:[], clients:[], paiements:[],
-  articles:[], stockMvts:[], livraisons:[], adhesionPays:[], mises:[], depenses:[]
+  articles:[], stockMvts:[], livraisons:[], adhesionPays:[], mises:[], depenses:[], fichesPaie:[]
 };
 
 // Données propres à la comptabilité (lecture/écriture)
@@ -68,7 +68,8 @@ let IDX = {
   clientsById:new Map(), commerciauxById:new Map(), articlesById:new Map(),
   paiementsByMonth:new Map(), paiementsByClient:new Map(),
   livraisonsByMonth:new Map(), livraisonsByClient:new Map(),
-  adhesionsByMonth:new Map(), chargesByMonth:new Map()
+  adhesionsByMonth:new Map(), chargesByMonth:new Map(),
+  autoDepByMonth:new Map(), achatsByMonth:new Map(), salairesByMonth:new Map()
 };
 function _groupBy(arr, keyFn){
   const m = new Map();
@@ -90,6 +91,78 @@ function buildIndexes(){
   IDX.livraisonsByClient = _groupBy(TDB.livraisons, l=>l.clientId);
   IDX.adhesionsByMonth = _groupBy(TDB.adhesionPays, a=>a.date?a.date.slice(0,7):null);
   IDX.chargesByMonth   = _groupBy(CHARGES, c=>c.date?c.date.slice(0,7):null);
+  buildAutoCharges();
+  IDX.autoDepByMonth   = _groupBy(AUTO_DEP, c=>c.date.slice(0,7));
+  IDX.achatsByMonth    = _groupBy(ACHATS,   c=>c.date.slice(0,7));
+  IDX.salairesByMonth  = _groupBy(SALAIRES_PAYES, c=>c.date.slice(0,7));
+}
+
+/* ═══════════════════════════════════════════════════
+   CHARGES AUTOMATIQUES (lues depuis l'app principale TMMB, jamais écrites)
+   ---------------------------------------------------
+   1. Dépenses des commerciaux (collection 'depenses') dont la nature contient :
+        « entraide »      -> catégorie Divers
+        « communic »      -> catégorie Télécoms
+        « prime »         -> catégorie Personnel (prime journalière)
+      (insensible aux majuscules/accents). Comptées comme CHARGES : résultat,
+      tableau de bord, journal, trésorerie.
+      Carburant/vidange NE sont PAS inclus (ils vont en retenue sur la fiche de paie).
+   2. Entrées de stock (collection 'stockMvts') dont le type contient « entr »,
+      « achat » ou « approv » : quantité × prix d'achat ACTUEL de l'article.
+      Comptées UNIQUEMENT en TRÉSORERIE (sortie d'argent). Pas dans le résultat
+      ni dans le journal : la marge des livraisons (PV − PA) y déduit déjà le coût.
+   Le panneau « Contrôle » de la page Charges montre ce qui est reconnu/ignoré.
+═══════════════════════════════════════════════════ */
+let SALAIRES_PAYES = [];
+let AUTO_DEP = [], ACHATS = [], AUTO_CTRL = { natures:{}, types:{}, invalides:0, sansPA:0 };
+const AUTO_DEP_REGLES = [
+  { match:'entraide', label:'Entraide',          categorie:'Divers'   },
+  { match:'communic', label:'Communication',     categorie:'Télécoms' },
+  { match:'prime',    label:'Prime (journalière, samedi…)', categorie:'Personnel'},
+];
+function _normTxt2(v){ return String(v||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim(); }
+function _autoDepRegle(d){ const n = _normTxt2(d.nature); return n ? (AUTO_DEP_REGLES.find(r=>n.includes(r.match)) || null) : null; }
+function _isEntreeStock(m){ const t = _normTxt2(m.type); return t.startsWith('entr') || t.includes('achat') || t.includes('approv'); }
+/* Date -> 'AAAA-MM-JJ' (chaîne ISO, ou Date issue d'un Timestamp). null si illisible. */
+function _isoDay(v){
+  if(v instanceof Date && !isNaN(v)) return `${v.getFullYear()}-${String(v.getMonth()+1).padStart(2,'0')}-${String(v.getDate()).padStart(2,'0')}`;
+  const s = String(v||''); return /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0,10) : null;
+}
+function buildAutoCharges(){
+  AUTO_DEP = []; ACHATS = []; AUTO_CTRL = { natures:{}, types:{}, invalides:0, sansPA:0 };
+  // Salaires bruts des fiches payées (non annulées) -> charge Personnel au dernier jour de la période
+  SALAIRES_PAYES = (TDB.fichesPaie||[]).filter(f=>!f.annule && /^\d{4}-\d{2}$/.test(f.periode||'')).map(f=>{
+    const [y,m] = f.periode.split('-').map(Number);
+    return { _id:'sal_'+f._id, _auto:'salaire', ficheId:f._id, date:`${f.periode}-${String(new Date(y, m, 0).getDate()).padStart(2,'0')}`,
+      montant:Number(f.brut||0), categorie:'Personnel', mode:'Fiche de paie',
+      libelle:`Salaire ${_MOIS_FR[m-1]} ${y} – ${f.nom}${f.poste?' ('+f.poste+')':''}` };
+  });
+  (TDB.depenses||[]).forEach(d=>{
+    const nat = String(d.nature||'(sans nature)').trim() || '(sans nature)';
+    const regle = _autoDepRegle(d);
+    const c = AUTO_CTRL.natures[nat] ||= { nb:0, total:0, inclus: regle ? regle.label : '' };
+    c.nb++; c.total += Number(d.montant||0);
+    if(!regle) return;
+    const date = _isoDay(d.date); if(!date){ AUTO_CTRL.invalides++; return; }
+    const com = IDX.commerciauxById.get(d.commercialId);
+    AUTO_DEP.push({ _id:'autodep_'+d._id, _auto:'depense', date, montant:Number(d.montant||0),
+      categorie:regle.categorie, libelle:`${nat} – ${com?.nom || d.commercialNom || 'commercial ?'}`,
+      nature:nat, mode:'App TMMB' });
+  });
+  (TDB.stockMvts||[]).forEach(m=>{
+    const typ = String(m.type||'(sans type)').trim() || '(sans type)';
+    const entree = _isEntreeStock(m);
+    const c = AUTO_CTRL.types[typ] ||= { nb:0, inclus: entree };
+    c.nb++;
+    if(!entree) return;
+    const qty = Number(m.qty||0); if(!(qty > 0)) return;
+    const date = _isoDay(m.date); if(!date){ AUTO_CTRL.invalides++; return; }
+    const art = IDX.articlesById.get(m.articleId);
+    const pa = Number(art?.pa||0);
+    if(!pa) AUTO_CTRL.sansPA++;
+    ACHATS.push({ _id:'autoach_'+m._id, _auto:'achat', date, montant: qty*pa, qty, pa,
+      categorie:'Achats stock', libelle:`Entrée stock – ${art?.nom || 'article inconnu'} (×${qty})`, sansPA: !pa });
+  });
 }
 /* Retourne les entrées d'une map-par-mois pour une période donnée :
    un mois précis ('YYYY-MM'), ou toute une année si month est vide. */
@@ -534,10 +607,11 @@ function _withTimeout(promise, ms, label){
       complet (ancien comportement, l'app reste fonctionnelle).
    ⚠ Ajouter une collection à CACHED_COLS impose d'incrémenter IDB_VER.
 ═══════════════════════════════════════════════════ */
-const CACHED_COLS      = ['clients','paiements','articles','livraisons','adhesionPays','depenses'];
+const CACHED_COLS      = ['clients','paiements','articles','livraisons','adhesionPays','depenses','stockMvts','fichesPaie'];
 const ALWAYS_FULL_COLS = ['agences','commerciaux'];   // petites, ou sans _ts (commerciaux)
-const COUNT_ONLY_COLS  = ['stockMvts','mises'];       // seulement affichées en nombre
-const IDB_NAME = 'triomphant_compta_cache', IDB_VER = 1;
+const COUNT_ONLY_COLS  = ['mises'];                   // seulement affichée en nombre
+// stockMvts : téléchargé depuis la v11 (charges automatiques : entrées de stock)
+const IDB_NAME = 'triomphant_compta_cache', IDB_VER = 3;   // v2 : stockMvts · v3 : fichesPaie
 const MARGIN_MS = 15*60*1000, DAY_MS = 864e5;
 const WIDEN_STEPS = [2*DAY_MS, 14*DAY_MS];
 
@@ -1085,15 +1159,24 @@ function totalAdhesions(year, month){
   return _monthlyRange(IDX.adhesionsByMonth, year, month)
     .reduce((a,p)=>a+Number(p.montant||0),0);
 }
-function totalCharges(year, month){
+/* Charges du résultat = charges saisies + dépenses des commerciaux (auto).
+   Les achats de stock n'y sont PAS (voir CHARGES AUTOMATIQUES). */
+function chargesPeriode(year, month){
   return _monthlyRange(IDX.chargesByMonth, year, month)
-    .reduce((a,c)=>a+Number(c.montant||0),0);
+    .concat(_monthlyRange(IDX.autoDepByMonth, year, month))
+    .concat(_monthlyRange(IDX.salairesByMonth, year, month));
+}
+function totalCharges(year, month){
+  return chargesPeriode(year, month).reduce((a,c)=>a+Number(c.montant||0),0);
 }
 function chargesParCat(year, month){
   const map = {};
-  _monthlyRange(IDX.chargesByMonth, year, month)
+  chargesPeriode(year, month)
     .forEach(c=>{ map[c.categorie]=(map[c.categorie]||0)+Number(c.montant||0); });
   return map;
+}
+function totalAchatsStock(year, month){
+  return _monthlyRange(IDX.achatsByMonth, year, month).reduce((a,c)=>a+Number(c.montant||0),0);
 }
 
 /* ═══════════════════════════════════════════════════
@@ -1240,8 +1323,23 @@ window.renderCharges = function(){
     <div class="kpi-card kc-purple"><div class="kpi-lbl">Nb d'écritures</div><div class="kpi-val kv-purple">${list.length}</div></div>
     <div class="kpi-card kc-yellow"><div class="kpi-lbl">Catégories</div><div class="kpi-val kv-yellow">${nbCats}</div></div>`;
 
+  // Doublons probables : même date et même montant qu'une charge automatique
+  const autoKeys = new Set(AUTO_DEP.concat(ACHATS).map(a=>a.date+'|'+Math.round(a.montant)));
+  // Salaires : même MOIS et même montant que le brut d'une fiche payée (saisie souvent faite le jour du paiement)
+  const salKeys  = new Set(SALAIRES_PAYES.map(a=>a.date.slice(0,7)+'|'+Math.round(a.montant)));
+  const isDoublon = c => autoKeys.has((c.date||'')+'|'+Math.round(Number(c.montant||0)))
+                      || salKeys.has((c.date||'').slice(0,7)+'|'+Math.round(Number(c.montant||0)));
+  const nbDoublons = list.filter(isDoublon).length;
+  if(!nbDoublons) window._chOnlyDoublons = false;
+  if(window._chOnlyDoublons) list = list.filter(isDoublon);
+  const dbl = document.getElementById('ch-doublons');
+  if(dbl){
+    dbl.style.display = nbDoublons ? 'block' : 'none';
+    dbl.innerHTML = nbDoublons ? `⚠️ <strong>${nbDoublons} charge(s) saisie(s)</strong> ont la même date et le même montant qu'une charge automatique (marquées « doublon ? ») : probable double saisie. Vérifiez et supprimez la saisie manuelle si c'est le cas.
+      <button class="btn btn-ghost btn-xs" style="margin-left:8px;" onclick="toggleChDoublons()">${window._chOnlyDoublons ? '↩ Afficher toutes les charges' : '🔍 Afficher uniquement les doublons'}</button>` : '';
+  }
   _setCount('ch-count', list.length);
-  const limit = _listLimitFor('charges', [month, cat, search, rg.du, rg.au, list.length].join('|'));
+  const limit = _listLimitFor('charges', [month, cat, search, rg.du, rg.au, !!window._chOnlyDoublons, list.length].join('|'));
   const shown = list.slice(0, limit);
   document.getElementById('tb-charges').innerHTML=list.length===0
     ? `<tr><td colspan="9" class="emp">${rg.erreur ? esc(rg.erreur) : 'Aucune charge trouvée'}</td></tr>`
@@ -1259,7 +1357,7 @@ window.renderCharges = function(){
         <td class="tm">${esc(c.mode||'—')}</td>
         <td class="tm" style="font-size:11px;">${esc(c.ref||'—')}</td>
         <td>${pjCell}</td>
-        <td class="amt-neg">${fmt(c.montant)} ${locked?'<span class="lock-badge" style="font-size:9px;">🔒</span>':''}</td>
+        <td class="amt-neg">${fmt(c.montant)} ${locked?'<span class="lock-badge" style="font-size:9px;">🔒</span>':''}${isDoublon(c)?' <span class="tag tag-warn" style="font-size:9px;" title="Même date et même montant qu\'une charge automatique">⚠️ doublon ?</span>':''}</td>
         <td class="no-print" style="white-space:nowrap;">
           ${locked ? `<span title="Période verrouillée" style="font-size:13px;opacity:0.5;">🔒</span>` : `
           <button class="btn btn-ghost btn-xs" onclick="editCharge('${esc(c._id)}')">✏️</button>
@@ -1267,7 +1365,63 @@ window.renderCharges = function(){
         </td>
       </tr>`;
     }).join('') + _listMoreRow('charges', shown.length, list.length, 9);
+  renderAutoCharges(month, cat, search, rg);
 };
+
+window.toggleChDoublons = function(){ window._chOnlyDoublons = !window._chOnlyDoublons; renderCharges(); };
+
+/* Section « Charges automatiques » de la page Charges (mêmes filtres). */
+function renderAutoCharges(month, cat, search, rg){
+  const tb = document.getElementById('tb-auto-charges');
+  if(!tb) return;
+  let list = AUTO_DEP.concat(ACHATS, SALAIRES_PAYES);
+  if(rg.erreur) list = [];
+  else if(rg.actif) list = list.filter(c=>_inRange(c.date, rg));
+  else if(month) list = list.filter(c=>c.date.startsWith(month));
+  if(cat) list = list.filter(c=>c.categorie===cat);
+  if(search) list = list.filter(c=>(c.libelle||'').toLowerCase().includes(search));
+  list.sort((a,b)=>b.date.localeCompare(a.date));
+  const totDep = list.filter(c=>c._auto==='depense').reduce((a,c)=>a+c.montant,0);
+  const totAch = list.filter(c=>c._auto==='achat').reduce((a,c)=>a+c.montant,0);
+  const totSal = list.filter(c=>c._auto==='salaire').reduce((a,c)=>a+c.montant,0);
+  _setCount('auto-count', list.length);
+  const sum = document.getElementById('auto-totaux');
+  if(sum) sum.innerHTML = `Salaires payés (fiches) : <strong style="color:var(--red);">${fmt(totSal)}</strong> &nbsp;·&nbsp; Dépenses commerciaux : <strong style="color:var(--red);">${fmt(totDep)}</strong> <span class="tm">(résultat + trésorerie)</span> &nbsp;·&nbsp; Achats stock : <strong style="color:var(--warn);">${fmt(totAch)}</strong> <span class="tm">(trésorerie seulement)</span>`;
+  const limit = _listLimitFor('autoCharges', [month, cat, search, rg.du, rg.au, list.length].join('|'));
+  const shown = list.slice(0, limit);
+  tb.innerHTML = list.length===0
+    ? `<tr><td colspan="6" class="emp">Aucune charge automatique sur cette période</td></tr>`
+    : shown.map(c=>`<tr>
+        <td class="fw6">${esc(c.date)}</td>
+        <td>${c._auto==='achat' ? '<span class="tag tag-warn">📦 Achat stock</span>' : c._auto==='salaire' ? '<span class="tag tag-purple">🧾 Salaire (fiche)</span>' : '<span class="tag tag-blue">👤 Dépense commercial</span>'}</td>
+        <td>${esc(c.libelle)}${c.sansPA?' <span class="tag tag-red" style="font-size:9px;" title="Prix d\'achat de l\'article à 0 ou article introuvable">PA manquant</span>':''}</td>
+        <td><span style="font-size:11px;font-weight:600;color:${catColor(c.categorie)};">${esc(c.categorie)}</span></td>
+        <td class="tm" style="font-size:11px;">${c._auto==='achat' ? 'Trésorerie' : 'Résultat + trésorerie'}</td>
+        <td class="amt-neg">${fmt(c.montant)}</td>
+      </tr>`).join('') + _listMoreRow('autoCharges', shown.length, list.length, 6);
+
+  // Panneau de contrôle : natures et types trouvés dans l'app TMMB
+  const ctrl = document.getElementById('auto-controle');
+  if(ctrl){
+    const nat = Object.entries(AUTO_CTRL.natures).sort((a,b)=>b[1].total-a[1].total);
+    const typ = Object.entries(AUTO_CTRL.types).sort((a,b)=>b[1].nb-a[1].nb);
+    ctrl.innerHTML = `
+      <div class="g2" style="margin-bottom:0;">
+        <div><div class="form-label" style="margin-bottom:6px;">Natures des dépenses (collection depenses)</div>
+          ${nat.length ? nat.map(([n,v])=>`<div class="lock-row"><span>${esc(n)} <span class="tm">(${v.nb})</span></span><span>${v.inclus?`<span class="tag tag-green">✓ ${esc(v.inclus)}</span>`:'<span class="tag" style="color:var(--muted);">ignorée</span>'}</span></div>`).join('') : '<div class="tm">Aucune dépense chargée</div>'}
+        </div>
+        <div><div class="form-label" style="margin-bottom:6px;">Types de mouvements de stock (collection stockMvts)</div>
+          ${typ.length ? typ.map(([t,v])=>`<div class="lock-row"><span>${esc(t)} <span class="tm">(${v.nb})</span></span><span>${v.inclus?'<span class="tag tag-green">✓ entrée (achat)</span>':'<span class="tag" style="color:var(--muted);">ignoré</span>'}</span></div>`).join('') : '<div class="tm">Aucun mouvement chargé</div>'}
+        </div>
+      </div>
+      <div class="tm" style="font-size:11px;margin-top:10px;line-height:1.6;">
+        Carburant et vidange sont volontairement ignorés ici : ils sont retenus sur la fiche de paie.
+        ${AUTO_CTRL.invalides?`<br>⚠️ ${AUTO_CTRL.invalides} élément(s) ignoré(s) car leur date est illisible.`:''}
+        ${AUTO_CTRL.sansPA?`<br>⚠️ ${AUTO_CTRL.sansPA} entrée(s) de stock valorisée(s) à 0 : prix d'achat manquant sur l'article.`:''}
+        <br>Si une nature ou un type est mal classé, communiquez-le pour ajuster la règle.
+      </div>`;
+  }
+}
 
 window.openModalCharge = function(id=null){
   chargeEditId = id;
@@ -1623,6 +1777,18 @@ function _journalData(){
     });
 
   // Charges → CHARGE (utilise pieceNum stocké si disponible)
+  // Salaires bruts des fiches payées → CHARGE
+  src(IDX.salairesByMonth)
+    .forEach(c=>{
+      ecritures.push({date:c.date,piece:'SAL-'+String(pieceNum++).padStart(4,'0'),type:'charge',libelle:`[Fiche de paie] ${c.libelle}`,debit:Number(c.montant||0),credit:0});
+    });
+
+  // Dépenses des commerciaux (auto, app TMMB) → CHARGE
+  src(IDX.autoDepByMonth)
+    .forEach(c=>{
+      ecritures.push({date:c.date,piece:'DEP-'+String(pieceNum++).padStart(4,'0'),type:'charge',libelle:`[Auto TMMB] [${c.categorie}] ${c.libelle}`,debit:Number(c.montant||0),credit:0});
+    });
+
   src(IDX.chargesByMonth)
     .forEach(c=>{
       ecritures.push({date:c.date,piece:c.pieceNum||c.ref||'CHG-'+String(pieceNum++).padStart(4,'0'),type:'charge',libelle:`[${c.categorie}] ${c.libelle}`,debit:Number(c.montant||0),credit:0});
@@ -2228,6 +2394,7 @@ function _fpPoste(){
 /* Entrées du menu « Fiche de paie » et « Payer un responsable » : même page,
    mode différent. */
 window.ouvrirFichePaie = function(type){
+  if(typeof window.fermerFichePayee === 'function') window.fermerFichePayee();
   go('fiche-paie');
   const sel = document.getElementById('fp-type');
   if(!sel) return;
@@ -2258,10 +2425,14 @@ function _depensesCommercial(commId, periodePrefix){
     .filter(d => d.commercialId === commId && (d.date||'').startsWith(periodePrefix))
     .forEach(d => {
       const m = Number(d.montant||0);
-      const nat = String(d.nature||'(sans nature)').trim() || '(sans nature)';
+      const brut = String(d.nature||'(sans nature)').trim() || '(sans nature)';
+      // Regroupe les mêmes natures écrites différemment (« Prime journalière » / « prime journaliere »)
+      const cle = _normTxt(brut);
+      const nat = (res._libelles ||= {})[cle] ||= brut;
       res.detail[nat] = (res.detail[nat]||0) + m;
       if(_isCarbuVidange(d)) res.carbuVidange += m; else res.autres += m;
     });
+  delete res._libelles;
   return res;
 }
 /* Pré-remplissage de la case « Carburation / vidange » : uniquement quand le
@@ -2283,6 +2454,7 @@ function _fpPersonnel(){
 window.renderFichePaie = function(){
   initFichePaieSelects();   // d'abord les sélecteurs (mois/année)…
   populateFpCommercials();  // …puis la liste, qui dépend du mois choisi (lignes manuelles)
+  renderFichesPayees();     // liste des fiches payées : visible même sans salarié sélectionné
 
   const container = document.getElementById('fp-container');
   if(!container) return;
@@ -2300,6 +2472,8 @@ window.renderFichePaie = function(){
 
   if(isAdmin ? !pers.nom : !commId){
     container.innerHTML = `<div style="text-align:center;padding:60px 0;color:var(--muted);font-size:14px;">👆 ${isAdmin ? 'Saisissez le nom du responsable' : 'Sélectionnez un commercial'} pour générer la fiche de paie</div>`;
+    window._fpCurrent = null;
+    const btn = document.getElementById('btn-payer-fiche'); if(btn){ btn.disabled = true; btn.title = 'Choisissez d\'abord un salarié'; }
     return;
   }
 
@@ -2372,7 +2546,81 @@ window.renderFichePaie = function(){
   // Nb paiements du mois
   const nbPaie = comm ? TDB.paiements.filter(p=>p.commercialId===commId && p.date && p.date.startsWith(`${year}-${month}`)).length : 0;
 
-  container.innerHTML = `
+  // [FICHES PAYÉES] Calculs regroupés dans F : affichés ici, et figés tels
+  // quels si la fiche est payée (réimpression identique ensuite).
+  const F = { isAdmin, commId, nomComm, poste, numFiche, month, year, salBase, primeRendement,
+    depensesCommercial, primeMotivation, primeHebdo, prime, brutTotal, avance, dettes, caution, epargne,
+    manquant, carbuVidange, cnss, its, cotCNSS, cotITS, totalRetenues, netAPayer, collecte, taux,
+    dep: { carbuVidange: dep.carbuVidange, autres: dep.autres, detail: dep.detail } };
+  window._fpCurrent = F;
+  container.innerHTML = _fpPaidBanner(F) + _fpGauge(F) + _fpHtml(F, true);
+};
+
+/* ═══ CADRAN : part de la carburation/vidange dans le total recouvré du mois ═══
+   Taux = montant « Carburation / vidange » de la fiche ÷ collecte du mois du
+   commercial (la même collecte que celle qui sert à la commission).
+   Affiché à l'écran seulement (jamais imprimé), commerciaux uniquement.
+   Seuil d'alerte réglable, mémorisé sur cet appareil. */
+function _fpSeuilCarbu(){
+  let v = 10;
+  try{ const x = Number(localStorage.getItem('compta_seuil_carbu')); if(x > 0 && x <= 100) v = x; }catch(e){}
+  return v;
+}
+window.setFpSeuilCarbu = function(v){
+  const n = Number(v);
+  if(!(n > 0 && n <= 100)){ notify('Seuil entre 0,1 et 100 %', 'err'); return; }
+  try{ localStorage.setItem('compta_seuil_carbu', String(n)); }catch(e){}
+  renderFichePaie();
+};
+function _fpGauge(F){
+  if(F.isAdmin) return '';
+  const seuil = _fpSeuilCarbu();
+  const carbu = Number(F.carbuVidange||0), collecte = Number(F.collecte||0);
+  const head = `<div class="gauge-card no-print">`;
+  const seuilInput = `<label class="gauge-seuil">Seuil d'alerte
+      <input type="number" min="0.1" max="100" step="0.5" value="${seuil}" onchange="setFpSeuilCarbu(this.value)"> %</label>`;
+  if(collecte <= 0){
+    return head + `<div class="gauge-info"><div class="gauge-title">⛽ Carburation / vidange ÷ recouvrement du mois</div>
+      <div class="gauge-empty">${carbu > 0 ? `⚠️ ${fmt(carbu)} de carburation / vidange mais <strong>aucun recouvrement</strong> ce mois : taux non calculable.` : 'Aucun recouvrement ni carburation / vidange ce mois.'}</div>${seuilInput}</div></div>`;
+  }
+  const taux = carbu / collecte * 100;
+  const max = Math.max(seuil * 2, 1);                       // échelle : 0 → 2 × seuil
+  const frac = Math.min(taux / max, 1);
+  const etat = taux > seuil ? 'rouge' : taux > seuil * 0.75 ? 'orange' : 'vert';
+  const libelle = { vert:'Dans la limite', orange:'Proche du seuil', rouge:'Au-dessus du seuil' }[etat];
+  // Demi-cercle : centre (100,100), rayon 80. Angle 180° (gauche) → 0° (droite).
+  const pt = f => { const a = Math.PI * (1 - f); return [100 + 80*Math.cos(a), 100 - 80*Math.sin(a)]; };
+  const arc = (f1, f2) => { const [x1,y1] = pt(f1), [x2,y2] = pt(f2); return `M${x1.toFixed(1)},${y1.toFixed(1)} A80,80 0 0 1 ${x2.toFixed(1)},${y2.toFixed(1)}`; };
+  const [nx, ny] = pt(frac);
+  const fS = 0.75 * seuil / max, fR = seuil / max;            // limites des zones
+  const tauxTxt = taux.toLocaleString('fr-FR', { maximumFractionDigits: 1 });
+  return head + `
+    <svg class="gauge-svg" viewBox="0 0 200 118" role="img" aria-label="Taux carburation et vidange : ${tauxTxt} % du recouvrement, seuil ${seuil} %">
+      <path d="${arc(0, fS)}" class="gz gz-vert"/>
+      <path d="${arc(fS, fR)}" class="gz gz-orange"/>
+      <path d="${arc(fR, 1)}" class="gz gz-rouge"/>
+      <line x1="100" y1="100" x2="${nx.toFixed(1)}" y2="${ny.toFixed(1)}" class="gauge-needle"/>
+      <circle cx="100" cy="100" r="6" class="gauge-hub"/>
+      <text x="18" y="116" class="gauge-tick">0 %</text>
+      <text x="182" y="116" class="gauge-tick" text-anchor="end">${max.toLocaleString('fr-FR')} %</text>
+    </svg>
+    <div class="gauge-info">
+      <div class="gauge-title">⛽ Carburation / vidange ÷ recouvrement du mois</div>
+      <div class="gauge-val g-${etat}">${tauxTxt} %${taux > max ? ' <span style="font-size:12px;">(hors échelle)</span>' : ''}</div>
+      <div class="gauge-state g-${etat}">${libelle} (${seuil} %)</div>
+      <div class="gauge-detail">${fmt(carbu)} de carburation / vidange sur ${fmt(collecte)} recouvrés</div>
+      ${seuilInput}
+    </div>
+  </div>`;
+}
+
+/* Modèle de la fiche (écran = true : avec aides non imprimées). paye = {date, annule} pour une fiche archivée. */
+function _fpHtml(F, screen, paye){
+  const { isAdmin, nomComm, poste, numFiche, month, year, salBase, primeRendement, depensesCommercial,
+    primeMotivation, primeHebdo, brutTotal, avance, dettes, caution, epargne, manquant, carbuVidange,
+    cnss, cotCNSS, totalRetenues, netAPayer } = F;
+  const dep = F.dep || { carbuVidange: carbuVidange, autres: depensesCommercial, detail: {} };
+  return `
   <div class="fp-doc" id="fp-printable">
 
     <!-- EN-TÊTE ENTREPRISE -->
@@ -2397,6 +2645,7 @@ window.renderFichePaie = function(){
       <p>Fonction / Poste : <strong>${esc(poste.toUpperCase())||'—'}</strong></p>
       <p>Matricule : <strong>${numFiche}</strong></p>
       <p>Période de paie : <strong>01/${month}/${year} au ${new Date(parseInt(year), parseInt(month), 0).getDate()}/${month}/${year}</strong></p>
+      ${paye ? `<p>Payée le : <strong>${esc(paye.date)}</strong>${paye.annule ? ' — <strong style="color:#c00;">FICHE ANNULÉE</strong>' : ''}</p>` : ''}
     </div>
 
     <!-- DÉTAIL RÉMUNÉRATION -->
@@ -2417,10 +2666,16 @@ window.renderFichePaie = function(){
           <td>Prime sur rendement</td>
           <td class="r">${Math.round(primeRendement).toLocaleString('fr-FR')}</td>
         </tr>
-        <tr class="no-print">
-          <td style="padding-left:24px;font-size:11px;color:var(--muted);">dont dépenses déduites (hors carburant/vidange : entraide, réparation…)</td>
-          <td class="r" style="font-size:11px;color:var(--muted);">${depensesCommercial>0?'-'+Math.round(depensesCommercial).toLocaleString('fr-FR'):'---'}</td>
-        </tr>`}
+        ${/* [DÉTAIL DES DÉPENSES DÉDUITES] une ligne imprimée par nature (prime samedi,
+             entraide, réparation…), hors carburant/vidange qui sont en retenue.
+             Lignes « dont » : information, déjà comprises dans la prime ci-dessus. */
+          Object.entries((dep && dep.detail) || {})
+            .filter(([n,m]) => !_isCarbuVidange({nature:n}) && Number(m))
+            .sort((a,b) => b[1]-a[1])
+            .map(([n,m]) => `<tr class="fp-sub">
+          <td>dont dépense déduite : ${esc(n)}</td>
+          <td class="r">−${Math.round(m).toLocaleString('fr-FR')}</td>
+        </tr>`).join('')}`}
         <tr>
           <td>Prime de motivation</td>
           <td class="r">${Math.round(primeMotivation).toLocaleString('fr-FR')}</td>
@@ -2470,7 +2725,7 @@ window.renderFichePaie = function(){
           <td>Carburation / vidange</td>
           <td class="r">${carbuVidange>0?Math.round(carbuVidange).toLocaleString('fr-FR'):'<span class="fp-dash">---</span>'}</td>
         </tr>
-        ${!isAdmin && Math.round(carbuVidange) !== Math.round(dep.carbuVidange) ? `<tr class="no-print">
+        ${screen && !isAdmin && Math.round(carbuVidange) !== Math.round(dep.carbuVidange) ? `<tr class="no-print">
           <td style="padding-left:24px;font-size:11px;color:var(--warn);">⚠️ montant modifié à la main — relevé dans les dépenses : ${Math.round(dep.carbuVidange).toLocaleString('fr-FR')}</td>
           <td></td>
         </tr>` : ''}
@@ -2485,7 +2740,7 @@ window.renderFichePaie = function(){
       </tbody>
     </table>
 
-    ${!isAdmin && Object.keys(dep.detail).length ? `<div class="no-print" style="font-size:11px;color:#555;background:#f4f6fb;border:1px dashed #aab;border-radius:6px;padding:8px 10px;margin:-4px 0 12px;">
+    ${screen && !isAdmin && Object.keys(dep.detail).length ? `<div class="no-print" style="font-size:11px;color:#555;background:#f4f6fb;border:1px dashed #aab;border-radius:6px;padding:8px 10px;margin:-4px 0 12px;">
       <strong>Contrôle (non imprimé)</strong> — dépenses du mois par nature :
       ${Object.entries(dep.detail).map(([n,m])=>`${esc(n)} : ${Math.round(m).toLocaleString('fr-FR')} → ${_isCarbuVidange({nature:n})?'<strong>retenue Carburation / vidange</strong>':'déduit de la prime'}`).join(' · ')}
     </div>` : ''}
@@ -2526,7 +2781,137 @@ window.renderFichePaie = function(){
     </div>
 
   </div>`;
+}
+
+/* ═══════════════════════════════════════════════════
+   FICHES DE PAIE PAYÉES (collection Firestore 'fichesPaie', 1 document par fiche)
+   ---------------------------------------------------
+   - « Payer » fige la fiche affichée et l'enregistre. Son SALAIRE BRUT devient
+     une charge « Personnel » (résultat, journal, trésorerie) datée du dernier
+     jour de la période de paie.
+   - Une même personne ne peut être payée deux fois pour la même période.
+   - Annulation (administrateur) : la fiche reste consultable, marquée ANNULÉE,
+     et sa charge disparaît. Rien n'est supprimé (traçabilité).
+   - Période verrouillée : ni paiement ni annulation.
+═══════════════════════════════════════════════════ */
+const _MOIS_FR = ['Janvier','Février','Mars','Avril','Mai','Juin','Juillet','Août','Septembre','Octobre','Novembre','Décembre'];
+function _fpPersonKey(F){ return F.isAdmin ? 'resp:' + _normTxt2(F.nomComm) : 'com:' + F.commId; }
+function _todayIso(){ const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
+const _frDate = iso => iso ? String(iso).slice(0,10).split('-').reverse().join('/') : '—';
+function _fichePayeeExistante(F){
+  const k = _fpPersonKey(F), per = `${F.year}-${F.month}`;
+  return (TDB.fichesPaie||[]).find(f => !f.annule && f.personKey === k && f.periode === per) || null;
+}
+function _fpPaidBanner(F){
+  const f = _fichePayeeExistante(F);
+  const btn = document.getElementById('btn-payer-fiche');
+  if(btn){ btn.disabled = !!f; btn.title = f ? 'Déjà payée pour cette période' : ''; }
+  if(!f) return '';
+  return `<div class="alert alert-success no-print" style="max-width:720px;margin:0 auto 12px;">✅ Fiche déjà <strong>payée le ${_frDate(f.datePaiement)}</strong> par ${esc(f.payeParNom||'—')} (brut ${fmt(f.brut)} · net ${fmt(f.net)}).
+    <button class="btn btn-ghost btn-xs" style="margin-left:8px;" onclick="voirFichePayee('${esc(f._id)}')">👁 Voir la fiche payée</button></div>`;
+}
+
+window.payerFichePaie = async function(){
+  const F = window._fpCurrent;
+  if(!F || (F.isAdmin ? !F.nomComm : !F.commId)){ notify('Générez d\'abord une fiche (choisissez un salarié)', 'err'); return; }
+  if(!db_fs){ notify('Non connecté à Firebase', 'err'); return; }
+  const periode = `${F.year}-${F.month}`;
+  if(isPeriodeLocked(periode)){ notify(`🔒 Période ${F.month}/${F.year} verrouillée : paiement impossible`, 'err'); return; }
+  const deja = _fichePayeeExistante(F);
+  if(deja){ notify(`Déjà payée le ${_frDate(deja.datePaiement)} — consultez-la dans « Fiches payées »`, 'err'); return; }
+  if(!(F.brutTotal > 0)){ notify('Salaire brut nul ou négatif : vérifiez la fiche avant de payer', 'err'); return; }
+  const msg = `Payer cette fiche ?\n\n${F.nomComm} — ${F.poste || ''}\nPériode : ${_MOIS_FR[parseInt(F.month)-1]} ${F.year}\nSalaire brut : ${Math.round(F.brutTotal).toLocaleString('fr-FR')} FCFA\nNet à payer : ${Math.round(F.netAPayer).toLocaleString('fr-FR')} FCFA`
+    + (F.netAPayer < 0 ? '\n\n⚠️ Le net à payer est NÉGATIF.' : '')
+    + `\n\nLe salaire brut sera enregistré dans les charges (Personnel). La fiche sera archivée et ne pourra plus être modifiée.`;
+  if(!confirm(msg)) return;
+  const u = getCurrentUser() || {};
+  const data = JSON.parse(JSON.stringify(F));   // copie figée, sans valeur 'undefined' (refusée par Firestore)
+  const rec = {
+    personKey: _fpPersonKey(F), periode, isAdmin: !!F.isAdmin, commId: F.commId || '',
+    nom: F.nomComm, poste: F.poste || '', numFiche: F.numFiche,
+    brut: Math.round(F.brutTotal), net: Math.round(F.netAPayer), data,
+    datePaiement: _todayIso(), payeParId: u.id || '', payeParNom: u.name || u.email || '',
+    annule: false, payeLe: serverTimestamp(), _ts: serverTimestamp()
+  };
+  const btn = document.getElementById('btn-payer-fiche'); if(btn) btn.disabled = true;
+  try{
+    const ref = await addDoc(collection(db_fs, 'fichesPaie'), rec);
+    (TDB.fichesPaie ||= []).push({ ...rec, _id: ref.id, payeLe: new Date(), _ts: new Date() });
+    buildIndexes();
+    notify(`✅ Fiche payée et enregistrée — brut ${fmt(rec.brut)} ajouté aux charges`);
+    renderFichePaie();
+  }catch(e){
+    if(btn) btn.disabled = false;
+    console.error('[fichesPaie] enregistrement refusé :', e);
+    notify(e?.code === 'permission-denied'
+      ? '⛔ Enregistrement refusé par Firebase : ajoutez la règle « fichesPaie » (voir notice)'
+      : 'Erreur d\'enregistrement : ' + (e?.message || e), 'err');
+  }
 };
+
+window.annulerFichePayee = async function(id){
+  if(window._userRole !== 'admin'){ notify('Réservé à l\'administrateur', 'err'); return; }
+  const f = (TDB.fichesPaie||[]).find(x=>x._id===id); if(!f || f.annule) return;
+  if(isPeriodeLocked(f.periode)){ notify('🔒 Période verrouillée : annulation impossible', 'err'); return; }
+  if(!confirm(`Annuler la fiche payée de ${f.nom} (${f.periode}) ?\n\nSa charge de ${Math.round(f.brut).toLocaleString('fr-FR')} FCFA sera retirée. La fiche restera consultable, marquée ANNULÉE.`)) return;
+  const u = getCurrentUser() || {};
+  try{
+    await updateDoc(doc(db_fs, 'fichesPaie', id), { annule: true, annuleLe: _todayIso(), annuleParNom: u.name || u.email || '', _ts: serverTimestamp() });
+    Object.assign(f, { annule: true, annuleLe: _todayIso(), annuleParNom: u.name || u.email || '' });
+    buildIndexes(); renderFichePaie(); notify('Fiche annulée');
+  }catch(e){ notify('Erreur : ' + (e?.message || e), 'err'); }
+};
+
+/* Consultation : la fiche figée remplace l'affichage courant (et c'est elle qui s'imprime). */
+window.voirFichePayee = function(id){
+  const f = (TDB.fichesPaie||[]).find(x=>x._id===id); if(!f) return;
+  const box = document.getElementById('fp-archive'); if(!box) return;
+  box.innerHTML = `<div class="alert ${f.annule?'alert-danger':'alert-info'} no-print" style="max-width:720px;margin:0 auto 12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+      <span style="flex:1;">📁 Fiche payée le <strong>${_frDate(f.datePaiement)}</strong> par ${esc(f.payeParNom||'—')}${f.annule?` — <strong>ANNULÉE le ${_frDate(f.annuleLe)}</strong>`:''}</span>
+      <button class="btn btn-primary btn-sm" onclick="window.print()">🖨️ Imprimer</button>
+      <button class="btn btn-ghost btn-sm" onclick="fermerFichePayee()">✕ Fermer</button>
+    </div>` + _fpHtml(f.data, false, { date: _frDate(f.datePaiement), annule: !!f.annule });
+  box.style.display = 'block';
+  document.querySelectorAll('#page-fiche-paie .fp-toolbar, #fp-container, #page-fiche-paie > .sec-hdr').forEach(el=>el.style.display='none');
+  document.getElementById('content').scrollTop = 0;
+};
+window.fermerFichePayee = function(){
+  const box = document.getElementById('fp-archive'); if(box){ box.innerHTML = ''; box.style.display = 'none'; }
+  document.querySelectorAll('#page-fiche-paie .fp-toolbar, #fp-container, #page-fiche-paie > .sec-hdr').forEach(el=>el.style.display='');
+};
+
+/* Liste des fiches payées (filtre période + recherche, paquets de 200). */
+function renderFichesPayees(){
+  const tb = document.getElementById('tb-fiches-payees'); if(!tb) return;
+  const per = document.getElementById('fpp-month')?.value || '';
+  const q = _normTxt2(document.getElementById('fpp-search')?.value || '');
+  let list = [...(TDB.fichesPaie||[])];
+  if(per) list = list.filter(f=>f.periode===per);
+  if(q) list = list.filter(f=>_normTxt2(f.nom).includes(q) || _normTxt2(f.poste).includes(q));
+  list.sort((a,b)=>(b.periode||'').localeCompare(a.periode||'') || (b.datePaiement||'').localeCompare(a.datePaiement||''));
+  const actives = list.filter(f=>!f.annule);
+  _setCount('fpp-count', list.length);
+  const tot = document.getElementById('fpp-totaux');
+  if(tot) tot.innerHTML = `Total brut (charges) : <strong style="color:var(--red);">${fmt(actives.reduce((a,f)=>a+Number(f.brut||0),0))}</strong> · Total net payé : <strong>${fmt(actives.reduce((a,f)=>a+Number(f.net||0),0))}</strong> <span class="tm">(fiches annulées exclues)</span>`;
+  const limit = _listLimitFor('fichesPayees', [per, q, list.length].join('|'));
+  const shown = list.slice(0, limit);
+  const isAdm = window._userRole === 'admin';
+  tb.innerHTML = list.length===0 ? `<tr><td colspan="8" class="emp">Aucune fiche payée${per||q?' pour ce filtre':''}</td></tr>`
+    : shown.map(f=>`<tr style="${f.annule?'opacity:.55;':''}">
+        <td class="fw6">${esc(_MOIS_FR[parseInt((f.periode||'').slice(5,7))-1]||'')} ${esc((f.periode||'').slice(0,4))}</td>
+        <td>${esc(f.nom)}<br><span class="tm" style="font-size:10px;">${esc(f.numFiche||'')}</span></td>
+        <td class="tm">${f.isAdmin?'Responsable':'Commercial'} · ${esc(f.poste||'—')}</td>
+        <td class="amt-neg">${fmt(f.brut)}</td>
+        <td class="fw6">${fmt(f.net)}</td>
+        <td class="tm" style="font-size:11px;">${_frDate(f.datePaiement)}<br>${esc(f.payeParNom||'')}</td>
+        <td>${f.annule?'<span class="tag tag-red">Annulée</span>':'<span class="tag tag-green">Payée</span>'}</td>
+        <td style="white-space:nowrap;">
+          <button class="btn btn-ghost btn-xs" onclick="voirFichePayee('${esc(f._id)}')">👁 Voir / imprimer</button>
+          ${isAdm && !f.annule ? `<button class="btn btn-danger btn-xs" style="margin-left:4px;" onclick="annulerFichePayee('${esc(f._id)}')">Annuler</button>` : ''}
+        </td>
+      </tr>`).join('') + _listMoreRow('fichesPayees', shown.length, list.length, 8);
+}
+window.renderFichesPayees = renderFichesPayees;
 
 window.exportFichePaieCSV = function(){
   const pers    = _fpPersonnel();
@@ -2974,10 +3359,11 @@ window.renderTresorerie = function(){
   const totalEntrees  = entPaiements + entLivraisons + entAdhesions;
 
   // SORTIES
-  const chargesPeriode= _monthlyRange(IDX.chargesByMonth, year, month);
-  const sortCharges   = chargesPeriode.reduce((a,c)=>a+Number(c.montant||0),0);
-  const sortPersonnel = chargesPeriode.filter(c=>c.categorie==='Personnel').reduce((a,c)=>a+Number(c.montant||0),0);
-  const totalSorties  = sortCharges;
+  const chPeriode     = chargesPeriode(year, month);           // saisies + dépenses commerciaux
+  const sortCharges   = chPeriode.reduce((a,c)=>a+Number(c.montant||0),0);
+  const sortPersonnel = chPeriode.filter(c=>c.categorie==='Personnel').reduce((a,c)=>a+Number(c.montant||0),0);
+  const sortAchats    = totalAchatsStock(year, month);         // entrées de stock au prix d'achat
+  const totalSorties  = sortCharges + sortAchats;
   const fluxNet       = totalEntrees - totalSorties;
 
   // KPI
@@ -2998,7 +3384,8 @@ window.renderTresorerie = function(){
 
   // Sorties détail par catégorie
   const catMap={};
-  chargesPeriode.forEach(c=>{ catMap[c.categorie]=(catMap[c.categorie]||0)+Number(c.montant||0); });
+  chPeriode.forEach(c=>{ catMap[c.categorie]=(catMap[c.categorie]||0)+Number(c.montant||0); });
+  if(sortAchats) catMap['Achats stock (auto)'] = sortAchats;
   const sortiesEl = document.getElementById('cf-sorties');
   if(sortiesEl) sortiesEl.innerHTML=
     Object.entries(catMap).sort((a,b)=>b[1]-a[1]).map(([cat,amt])=>
@@ -3014,7 +3401,7 @@ window.renderTresorerie = function(){
     const ein = totalPaiements(year,m)
               + _monthlyRange(IDX.livraisonsByMonth, year, m).filter(l=>l.statut!=='en_attente').reduce((a,l)=>a+Number(l.montant||0),0)
               + totalAdhesions(year,m);
-    const eout= totalCharges(year,m);
+    const eout= totalCharges(year,m) + totalAchatsStock(year,m);
     labels.push(moisNoms[i]); dataIn.push(ein); dataOut.push(eout); dataNet.push(ein-eout);
   }
   const ctx=document.getElementById('chart-cashflow');
@@ -3056,7 +3443,10 @@ function soldeTresorerieCumule(){
   const entrees = TDB.paiements.reduce((a,p)=>a+Number(p.montant||0),0)
                 + TDB.livraisons.filter(l=>l.statut!=='en_attente').reduce((a,l)=>a+Number(l.montant||0),0)
                 + (TDB.adhesionPays||[]).reduce((a,x)=>a+Number(x.montant||0),0);
-  const sorties = CHARGES.reduce((a,c)=>a+Number(c.montant||0),0);
+  const sorties = CHARGES.reduce((a,c)=>a+Number(c.montant||0),0)
+                + AUTO_DEP.reduce((a,c)=>a+Number(c.montant||0),0)
+                + ACHATS.reduce((a,c)=>a+Number(c.montant||0),0)
+                + SALAIRES_PAYES.reduce((a,c)=>a+Number(c.montant||0),0);
   return entrees - sorties;
 }
 function ratioCoutMoyenArticles(){
@@ -3086,16 +3476,25 @@ function rythmeMensuelMoyen(){
     entreesTot += totalLivraisons(year, String(m).padStart(2,'0')) + totalAdhesions(year, String(m).padStart(2,'0'));
     sortiesChargesTot += totalCharges(year, String(m).padStart(2,'0'));
   }
-  // Salaires moyens : moyenne sur les mois de l'année en cours qui ont des données, sinon moyenne globale
-  const moisAnneeAvecSalaire = Object.keys(SAL_DATA||{}).filter(k=>k.startsWith(year+'-'));
+  // [FICHES PAYÉES] Les charges ci-dessus incluent déjà les salaires des fiches payées.
+  // Pour ne pas les compter deux fois, l'estimation Auto-Salaire n'est utilisée que
+  // pour les mois SANS fiche payée.
+  const moisPayes = new Set(SALAIRES_PAYES.map(c=>c.date.slice(0,7)).filter(k=>k.startsWith(year+'-')));
+  const moisAnneeAvecSalaire = Object.keys(SAL_DATA||{}).filter(k=>k.startsWith(year+'-') && !moisPayes.has(k));
   const taux = tauxSalaireGlobal();
   let salairesMoy = 0;
-  if(moisAnneeAvecSalaire.length>0){
+  if(moisPayes.size>0 && moisAnneeAvecSalaire.length===0){
+    salairesMoy = 0;   // tous les mois avec salaires sont payés : déjà dans les charges
+  } else if(moisAnneeAvecSalaire.length>0){
     let sTot=0;
     moisAnneeAvecSalaire.forEach(k=>{
       (SAL_DATA[k]||[]).forEach(l=>{ sTot += Number(l.collecte||0)*taux + Number(l.prime||0); });
     });
-    salairesMoy = sTot/moisAnneeAvecSalaire.length;
+    // Moyenne sur TOUS les mois ayant des salaires (estimés + payés) : un mois payé
+    // compte pour 0 ici puisque son salaire réel est déjà dans les charges.
+    // Sans aucune fiche payée, le calcul est identique à l'ancien.
+    const moisPayesAnnee = [...moisPayes].filter(k=>k.startsWith(year+'-')).length;
+    salairesMoy = sTot/(moisAnneeAvecSalaire.length + moisPayesAnnee);
   } else {
     const allKeys = Object.keys(SAL_DATA||{});
     salairesMoy = allKeys.length>0 ? totalSalairesTous()/allKeys.length : 0;
@@ -3110,7 +3509,9 @@ window.renderAutonomie = function(){
   const solde      = soldeTresorerieCumule();
   const capital    = solde + valStock;
   const liv        = coutLivraisonsDuesTotal();
-  const chargesTot = totalCharges('','');
+  // [CORRECTIF] totalCharges('','') ne renvoyait rien (année vide) : la ligne affichait 0.
+  // Affichage seulement : le capital, lui, intégrait déjà les charges via la trésorerie cumulée.
+  const chargesTot = CHARGES.concat(AUTO_DEP, SALAIRES_PAYES).reduce((a,c)=>a+Number(c.montant||0),0);
   const salairesTot= totalSalairesTous();
   const rythme     = rythmeMensuelMoyen();
 
@@ -3130,7 +3531,7 @@ window.renderAutonomie = function(){
     <div class="cf-row"><span>👥 Clients payés, non livrés</span><span>${liv.nbClients}</span></div>
     <div class="cf-row"><span>💸 Montant total encaissé (dette)</span><span>${fmt(liv.totalPaye)}</span></div>
     <div class="cf-row"><span>📦 Coût d'achat estimé à livrer (PA)</span><span class="cf-out">−${fmt(liv.cout)}</span></div>
-    <div class="cf-row"><span>🧾 Charges saisies (historique)</span><span class="cf-out">−${fmt(chargesTot)}</span></div>
+    <div class="cf-row"><span>🧾 Charges (historique : saisies, dépenses commerciaux, salaires payés)</span><span class="cf-out">−${fmt(chargesTot)}</span></div>
     <div class="cf-row"><span>👤 Salaires calculés (historique)</span><span class="cf-out">−${fmt(salairesTot)}</span></div>
     <div class="cf-row cf-total"><span>CAPITAL NET (après coût des livraisons)</span><span class="${capitalNetApresLivraisons>=0?'cf-net-pos':'cf-net-neg'}">${fmt(capitalNetApresLivraisons)}</span></div>
     <div style="font-size:11px;margin-top:6px;">Ratio coût moyen (PA/PV) utilisé : ${(liv.ratioCout*100).toFixed(1)}%</div>`;
