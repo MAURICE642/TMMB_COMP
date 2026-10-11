@@ -1,5 +1,5 @@
 import { initializeApp, getApps, getApp, deleteApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import { getFirestore, collection, getDocs, addDoc, doc, getDoc, setDoc, updateDoc, deleteDoc, onSnapshot, serverTimestamp, query, where, limit, getCountFromServer, Timestamp, orderBy, startAfter, documentId } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+import { getFirestore, collection, getDocs, addDoc, doc, getDoc, setDoc, updateDoc, deleteDoc, onSnapshot, serverTimestamp, query, where, limit, getCountFromServer, Timestamp, orderBy, startAfter, documentId, writeBatch } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut as fbSignOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 window._fbSignOut = fbSignOut;
 
@@ -14,7 +14,7 @@ const CUR_MONTH = TODAY.slice(0,7);
 // Données lues depuis TRIOMPHANT (lecture seule)
 let TDB = {
   agences:[], commerciaux:[], clients:[], paiements:[],
-  articles:[], stockMvts:[], livraisons:[], adhesionPays:[], mises:[], depenses:[], fichesPaie:[]
+  articles:[], stockMvts:[], livraisons:[], adhesionPays:[], mises:[], depenses:[], fichesPaie:[], chargesAuto:[]
 };
 
 // Données propres à la comptabilité (lecture/écriture)
@@ -92,7 +92,7 @@ function buildIndexes(){
   IDX.adhesionsByMonth = _groupBy(TDB.adhesionPays, a=>a.date?a.date.slice(0,7):null);
   IDX.chargesByMonth   = _groupBy(CHARGES, c=>c.date?c.date.slice(0,7):null);
   buildAutoCharges();
-  IDX.autoDepByMonth   = _groupBy(AUTO_DEP, c=>c.date.slice(0,7));
+  IDX.autoDepByMonth   = _groupBy(DEP_ECRITES, c=>c.date.slice(0,7));   // enregistrées seulement
   IDX.achatsByMonth    = _groupBy(ACHATS,   c=>c.date.slice(0,7));
   IDX.salairesByMonth  = _groupBy(SALAIRES_PAYES, c=>c.date.slice(0,7));
 }
@@ -114,6 +114,16 @@ function buildIndexes(){
    Le panneau « Contrôle » de la page Charges montre ce qui est reconnu/ignoré.
 ═══════════════════════════════════════════════════ */
 let SALAIRES_PAYES = [];
+/* ═══ DÉPENSES ENREGISTRÉES (collection 'chargesAuto', 1 document par dépense TMMB) ═══
+   Identifiant du document = 'dep_' + identifiant de la dépense TMMB : une dépense
+   ne peut être écrite qu'UNE fois. État (etat) :
+     active          -> comptée (résultat, journal, trésorerie)
+     supprimee       -> supprimée à la main : jamais réécrite
+     retiree_source  -> dépense supprimée (ou plus éligible) dans l'app TMMB
+   AUTO_DEP = dépenses LUES et éligibles ; DEP_ECRITES = enregistrées actives ;
+   DEP_EN_ATTENTE = lues mais pas encore enregistrées (non comptées). */
+let DEP_ECRITES = [], DEP_EN_ATTENTE = [], CA_BY_SRC = new Map();
+function _sigDep(a){ return [a.date, Math.round(Number(a.montant||0)), _normTxt2(a.nature), a.commercialId||'', a.categorie].join('|'); }
 let AUTO_DEP = [], ACHATS = [], AUTO_CTRL = { natures:{}, types:{}, invalides:0, sansPA:0 };
 const AUTO_DEP_REGLES = [
   { match:'entraide', label:'Entraide',          categorie:'Divers'   },
@@ -128,8 +138,22 @@ function _isoDay(v){
   if(v instanceof Date && !isNaN(v)) return `${v.getFullYear()}-${String(v.getMonth()+1).padStart(2,'0')}-${String(v.getDate()).padStart(2,'0')}`;
   const s = String(v||''); return /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0,10) : null;
 }
+/* Rapport de lecture : 1 ligne par document source (chargé OU ignoré, avec la raison). */
+let AUTO_AUDIT = [];
+let AUTO_LECTURE = null;   // résultat du dernier « Relire depuis l'app TMMB »
+function _audit(src, d, date, libelle, montant, statut, motif){
+  AUTO_AUDIT.push({ src, id:d._id, date: date || '', libelle, montant: Number(montant)||0, statut, motif });
+}
 function buildAutoCharges(){
-  AUTO_DEP = []; ACHATS = []; AUTO_CTRL = { natures:{}, types:{}, invalides:0, sansPA:0 };
+  AUTO_DEP = []; ACHATS = []; AUTO_AUDIT = []; AUTO_CTRL = { natures:{}, types:{}, invalides:0, sansPA:0 };
+  CA_BY_SRC = new Map((TDB.chargesAuto||[]).map(c=>[c.sourceId, c]));
+  // Rapport : fiches de paie
+  (TDB.fichesPaie||[]).forEach(f=>{
+    const lib = `${f.nom||'?'} – ${f.periode||'?'}`;
+    if(f.annule) _audit('fiche', f, f.periode, lib, f.brut, 'ignoree', `Fiche annulée le ${_frDate(f.annuleLe)}`);
+    else if(!/^\d{4}-\d{2}$/.test(f.periode||'')) _audit('fiche', f, '', lib, f.brut, 'ignoree', 'Période illisible');
+    else _audit('fiche', f, f.periode, lib, f.brut, 'chargee', 'Salaire brut → charge Personnel');
+  });
   // Salaires bruts des fiches payées (non annulées) -> charge Personnel au dernier jour de la période
   SALAIRES_PAYES = (TDB.fichesPaie||[]).filter(f=>!f.annule && /^\d{4}-\d{2}$/.test(f.periode||'')).map(f=>{
     const [y,m] = f.periode.split('-').map(Number);
@@ -142,24 +166,59 @@ function buildAutoCharges(){
     const regle = _autoDepRegle(d);
     const c = AUTO_CTRL.natures[nat] ||= { nb:0, total:0, inclus: regle ? regle.label : '' };
     c.nb++; c.total += Number(d.montant||0);
-    if(!regle) return;
-    const date = _isoDay(d.date); if(!date){ AUTO_CTRL.invalides++; return; }
     const com = IDX.commerciauxById.get(d.commercialId);
-    AUTO_DEP.push({ _id:'autodep_'+d._id, _auto:'depense', date, montant:Number(d.montant||0),
+    const lib = `${nat} – ${com?.nom || d.commercialNom || 'commercial ?'}`;
+    const dateA = _isoDay(d.date);
+    if(!regle){
+      _audit('depense', d, dateA, lib, d.montant, 'ignoree', _isCarbuVidange(d)
+        ? 'Carburant / vidange : retenu sur la fiche de paie, pas une charge auto'
+        : `Nature « ${nat} » non retenue comme charge (entraide, communication, prime uniquement)`);
+      return;
+    }
+    const date = dateA; if(!date){ AUTO_CTRL.invalides++; _audit('depense', d, '', lib, d.montant, 'ignoree', `Date illisible (« ${String(d.date??'vide')} »)`); return; }
+    const lue = { _id:'autodep_'+d._id, sourceId:d._id, _auto:'depense', date, montant:Number(d.montant||0),
       categorie:regle.categorie, libelle:`${nat} – ${com?.nom || d.commercialNom || 'commercial ?'}`,
-      nature:nat, mode:'App TMMB' });
+      nature:nat, commercialId:d.commercialId||'', mode:'App TMMB' };
+    lue.signature = _sigDep(lue);
+    AUTO_DEP.push(lue);
+    const w = CA_BY_SRC.get(d._id);
+    if(!w)                          _audit('depense', d, date, lib, d.montant, 'attente', `Lue, pas encore enregistrée (charge ${regle.categorie})`);
+    else if(w.etat === 'supprimee') _audit('depense', d, date, lib, d.montant, 'ignoree', `Supprimée à la main le ${_frDate(w.supprimeLe)} : ne sera pas réécrite`);
+    else if(w.etat === 'active' && w.signature !== lue.signature && w.modifieManuellement)
+                                    _audit('depense', d, date, lib, d.montant, 'alerte', 'Conflit : modifiée à la main, et la dépense a changé dans l\'app TMMB (non écrasée)');
+    else if(w.etat !== 'active' || w.signature !== lue.signature)
+                                    _audit('depense', d, date, lib, d.montant, 'attente', 'Modifiée dans l\'app TMMB : sera mise à jour au prochain enregistrement');
+    else                            _audit('depense', d, date, lib, w.montant, 'chargee', `Enregistrée en comptabilité (charge ${w.categorie}${w.modifieManuellement?', modifiée à la main':''})`);
+  });
+  // Dépenses enregistrées / en attente / enregistrées dont la source a disparu
+  const srcLues = new Set(AUTO_DEP.map(a=>a.sourceId));
+  DEP_ECRITES = (TDB.chargesAuto||[]).filter(c=>c.etat==='active' && /^\d{4}-\d{2}-\d{2}$/.test(c.date||'')).map(c=>({
+    _id:'ca_'+c._id, _caId:c._id, sourceId:c.sourceId, _auto:'depense', date:c.date, montant:Number(c.montant||0),
+    categorie:c.categorie, libelle:c.libelle, nature:c.nature, mode:'App TMMB', modifieManuellement:!!c.modifieManuellement }));
+  DEP_EN_ATTENTE = AUTO_DEP.filter(a=>!CA_BY_SRC.has(a.sourceId));
+  (TDB.chargesAuto||[]).forEach(c=>{
+    if(c.etat==='active' && !srcLues.has(c.sourceId))
+      _audit('depense', {_id:c.sourceId}, c.date, c.libelle, c.montant, 'alerte',
+        c.modifieManuellement ? 'Conflit : dépense absente de l\'app TMMB, mais modifiée à la main (non retirée)'
+                              : 'Dépense absente de l\'app TMMB (supprimée ou plus éligible) : sera retirée au prochain enregistrement');
   });
   (TDB.stockMvts||[]).forEach(m=>{
     const typ = String(m.type||'(sans type)').trim() || '(sans type)';
     const entree = _isEntreeStock(m);
     const c = AUTO_CTRL.types[typ] ||= { nb:0, inclus: entree };
     c.nb++;
-    if(!entree) return;
-    const qty = Number(m.qty||0); if(!(qty > 0)) return;
-    const date = _isoDay(m.date); if(!date){ AUTO_CTRL.invalides++; return; }
     const art = IDX.articlesById.get(m.articleId);
+    const qty = Number(m.qty||0);
+    const lib = `${typ} – ${art?.nom || 'article inconnu'} (×${m.qty ?? '?'})`;
+    const dateA = _isoDay(m.date);
+    if(!entree){ _audit('stock', m, dateA, lib, 0, 'ignoree', `Type « ${typ} » : pas une entrée de stock`); return; }
+    if(!(qty > 0)){ _audit('stock', m, dateA, lib, 0, 'ignoree', 'Quantité nulle ou négative'); return; }
+    const date = dateA; if(!date){ AUTO_CTRL.invalides++; _audit('stock', m, '', lib, 0, 'ignoree', `Date illisible (« ${String(m.date??'vide')} »)`); return; }
     const pa = Number(art?.pa||0);
     if(!pa) AUTO_CTRL.sansPA++;
+    _audit('stock', m, date, lib, qty*pa, pa ? 'chargee' : 'alerte', pa
+      ? `Achat : ${qty} × PA ${pa.toLocaleString('fr-FR')} → trésorerie`
+      : (art ? 'Prix d\'achat de l\'article à 0 : valorisée 0' : 'Article introuvable : valorisée 0'));
     ACHATS.push({ _id:'autoach_'+m._id, _auto:'achat', date, montant: qty*pa, qty, pa,
       categorie:'Achats stock', libelle:`Entrée stock – ${art?.nom || 'article inconnu'} (×${qty})`, sansPA: !pa });
   });
@@ -607,11 +666,11 @@ function _withTimeout(promise, ms, label){
       complet (ancien comportement, l'app reste fonctionnelle).
    ⚠ Ajouter une collection à CACHED_COLS impose d'incrémenter IDB_VER.
 ═══════════════════════════════════════════════════ */
-const CACHED_COLS      = ['clients','paiements','articles','livraisons','adhesionPays','depenses','stockMvts','fichesPaie'];
+const CACHED_COLS      = ['clients','paiements','articles','livraisons','adhesionPays','depenses','stockMvts','fichesPaie','chargesAuto'];
 const ALWAYS_FULL_COLS = ['agences','commerciaux'];   // petites, ou sans _ts (commerciaux)
 const COUNT_ONLY_COLS  = ['mises'];                   // seulement affichée en nombre
 // stockMvts : téléchargé depuis la v11 (charges automatiques : entrées de stock)
-const IDB_NAME = 'triomphant_compta_cache', IDB_VER = 3;   // v2 : stockMvts · v3 : fichesPaie
+const IDB_NAME = 'triomphant_compta_cache', IDB_VER = 4;   // v2 : stockMvts · v3 : fichesPaie · v4 : chargesAuto
 const MARGIN_MS = 15*60*1000, DAY_MS = 864e5;
 const WIDEN_STEPS = [2*DAY_MS, 14*DAY_MS];
 
@@ -1324,7 +1383,7 @@ window.renderCharges = function(){
     <div class="kpi-card kc-yellow"><div class="kpi-lbl">Catégories</div><div class="kpi-val kv-yellow">${nbCats}</div></div>`;
 
   // Doublons probables : même date et même montant qu'une charge automatique
-  const autoKeys = new Set(AUTO_DEP.concat(ACHATS).map(a=>a.date+'|'+Math.round(a.montant)));
+  const autoKeys = new Set(DEP_ECRITES.concat(DEP_EN_ATTENTE, ACHATS).map(a=>a.date+'|'+Math.round(a.montant)));
   // Salaires : même MOIS et même montant que le brut d'une fiche payée (saisie souvent faite le jour du paiement)
   const salKeys  = new Set(SALAIRES_PAYES.map(a=>a.date.slice(0,7)+'|'+Math.round(a.montant)));
   const isDoublon = c => autoKeys.has((c.date||'')+'|'+Math.round(Number(c.montant||0)))
@@ -1366,6 +1425,211 @@ window.renderCharges = function(){
       </tr>`;
     }).join('') + _listMoreRow('charges', shown.length, list.length, 9);
   renderAutoCharges(month, cat, search, rg);
+  renderRapportLecture();
+};
+
+/* Ce qu'il faut écrire pour que 'chargesAuto' reflète les dépenses lues. */
+function _planChargesAuto(){
+  const plan = { nouveaux:[], majs:[], retraits:[], bloques:[], conflits:[] };
+  const lock = d => !!d && isPeriodeLocked(String(d).slice(0,7));
+  const srcLues = new Map(AUTO_DEP.map(a=>[a.sourceId, a]));
+  AUTO_DEP.forEach(a=>{
+    const w = CA_BY_SRC.get(a.sourceId);
+    if(!w){ (lock(a.date) ? plan.bloques : plan.nouveaux).push(a); return; }
+    if(w.etat === 'supprimee') return;                                   // jamais réécrite
+    if(w.etat === 'active' && w.signature === a.signature) return;       // à jour
+    if(w.etat === 'active' && w.modifieManuellement){ plan.conflits.push(a); return; }
+    if(lock(a.date) || lock(w.date)){ plan.bloques.push(a); return; }
+    plan.majs.push({ w, a });
+  });
+  (TDB.chargesAuto||[]).forEach(w=>{
+    if(w.etat !== 'active' || srcLues.has(w.sourceId)) return;
+    if(w.modifieManuellement){ plan.conflits.push(w); return; }
+    if(lock(w.date)){ plan.bloques.push(w); return; }
+    plan.retraits.push(w);
+  });
+  return plan;
+}
+
+/* Écrit le plan dans Firestore (lots de 400 écritures), puis met à jour l'affichage. */
+async function _ecrireChargesAuto(plan){
+  const u = getCurrentUser() || {};
+  const qui = u.name || u.email || '';
+  const ops = [];
+  plan.nouveaux.forEach(a=>ops.push({ id:'dep_'+a.sourceId, type:'set', data:{
+    sourceCol:'depenses', sourceId:a.sourceId, date:a.date, montant:a.montant, categorie:a.categorie,
+    nature:a.nature, libelle:a.libelle, commercialId:a.commercialId, mode:'App TMMB', etat:'active',
+    signature:a.signature, modifieManuellement:false, ecritLe:_todayIso(), ecritParNom:qui, _ts:serverTimestamp() } }));
+  plan.majs.forEach(({w,a})=>ops.push({ id:w._id, type:'update', data:{
+    date:a.date, montant:a.montant, categorie:a.categorie, nature:a.nature, libelle:a.libelle, commercialId:a.commercialId,
+    signature:a.signature, etat:'active', majSourceLe:_todayIso(), _ts:serverTimestamp() } }));
+  plan.retraits.forEach(w=>ops.push({ id:w._id, type:'update', data:{ etat:'retiree_source', retireLe:_todayIso(), _ts:serverTimestamp() } }));
+  for(let i=0; i<ops.length; i+=400){
+    const batch = writeBatch(db_fs);
+    ops.slice(i, i+400).forEach(o=>{
+      const ref = doc(db_fs, 'chargesAuto', o.id);
+      if(o.type === 'set') batch.set(ref, o.data); else batch.update(ref, o.data);
+    });
+    await batch.commit();
+    // Mise à jour locale du lot écrit
+    ops.slice(i, i+400).forEach(o=>{
+      const loc = (TDB.chargesAuto ||= []).find(c=>c._id===o.id);
+      const d = { ...o.data, _ts:new Date() };
+      if(loc) Object.assign(loc, d); else TDB.chargesAuto.push({ ...d, _id:o.id });
+    });
+  }
+  buildIndexes();
+  return ops.length;
+}
+
+/* Enregistre les dépenses lues (sans relire Firebase). Utilisé seul ou après une relecture. */
+window.enregistrerChargesAuto = async function(apresRelecture){
+  if(!db_fs){ notify('Non connecté à Firebase', 'err'); return; }
+  if(!apresRelecture){
+    // Rafraîchir 'chargesAuto' (autre appareil) avant d'écrire : quelques lectures seulement
+    try{ await _syncCollection('chargesAuto', { reads:0, delta:0, full:[], incr:[], errors:[] }, false); buildIndexes(); }catch(e){}
+  }
+  const plan = _planChargesAuto();
+  const nb = plan.nouveaux.length + plan.majs.length + plan.retraits.length;
+  const tot = arr => fmt(arr.reduce((a,c)=>a+Number((c.a||c).montant||0),0));
+  const info = (plan.bloques.length ? `\n🔒 ${plan.bloques.length} ignorée(s) : période verrouillée` : '')
+             + (plan.conflits.length ? `\n⚠️ ${plan.conflits.length} conflit(s) non traité(s) : charge modifiée à la main (voir le rapport)` : '');
+  if(!nb){
+    notify(info ? '⚠️ Rien à enregistrer —' + info.replace(/\n/g,' ·') : '✅ Rien à enregistrer : les charges sont à jour', info ? 'err' : 'ok');
+    renderCharges(); return;
+  }
+  if(!confirm(`Enregistrer en comptabilité les dépenses lues dans l'app TMMB ?\n\n`
+    + `➕ ${plan.nouveaux.length} nouvelle(s) charge(s) : ${tot(plan.nouveaux)}\n`
+    + `✏️ ${plan.majs.length} mise(s) à jour (modifiées dans l'app TMMB)\n`
+    + `➖ ${plan.retraits.length} retrait(s) (supprimées dans l'app TMMB) : ${tot(plan.retraits)}`
+    + info + `\n\nUne dépense déjà enregistrée n'est jamais réécrite.`)) return;
+  try{
+    const n = await _ecrireChargesAuto(plan);
+    notify(`✅ ${n} écriture(s) enregistrée(s) en comptabilité`);
+  }catch(e){
+    console.error('[chargesAuto] écriture refusée :', e);
+    notify(e?.code === 'permission-denied'
+      ? '⛔ Enregistrement refusé par Firebase : ajoutez la règle « chargesAuto » (voir notice)'
+      : 'Erreur d\'enregistrement : ' + (e?.message || e), 'err');
+  }
+  renderCharges();
+};
+
+window.modifierChargeAuto = async function(id){
+  const c = (TDB.chargesAuto||[]).find(x=>x._id===id); if(!c) return;
+  if(isPeriodeLocked(String(c.date).slice(0,7))){ notify('🔒 Période verrouillée', 'err'); return; }
+  const m = prompt(`Montant (FCFA) — ${c.libelle}`, String(c.montant)); if(m === null) return;
+  const montant = Number(String(m).replace(/[\s\u202f]/g,'').replace(',','.'));
+  if(!(montant >= 0) || !isFinite(montant)){ notify('Montant invalide', 'err'); return; }
+  const lib = prompt('Libellé', c.libelle); if(lib === null) return;
+  if(!lib.trim()){ notify('Libellé vide', 'err'); return; }
+  const u = getCurrentUser() || {};
+  const data = { montant: Math.round(montant), libelle: lib.trim().slice(0,200), modifieManuellement:true,
+                 modifieLe:_todayIso(), modifieParNom:u.name||u.email||'', _ts:serverTimestamp() };
+  try{ await updateDoc(doc(db_fs,'chargesAuto',id), data); Object.assign(c, data, {_ts:new Date()}); buildIndexes(); renderCharges(); notify('Charge modifiée'); }
+  catch(e){ notify('Erreur : ' + (e?.message || e), 'err'); }
+};
+
+window.supprimerChargeAuto = async function(id){
+  if(window._userRole !== 'admin'){ notify('Réservé à l\'administrateur', 'err'); return; }
+  const c = (TDB.chargesAuto||[]).find(x=>x._id===id); if(!c) return;
+  if(isPeriodeLocked(String(c.date).slice(0,7))){ notify('🔒 Période verrouillée', 'err'); return; }
+  if(!confirm(`Supprimer la charge « ${c.libelle} » (${fmt(c.montant)}) ?\n\nElle ne sera plus comptée et ne sera JAMAIS réécrite, même à la prochaine lecture.`)) return;
+  const u = getCurrentUser() || {};
+  const data = { etat:'supprimee', supprimeLe:_todayIso(), supprimeParNom:u.name||u.email||'', _ts:serverTimestamp() };
+  try{ await updateDoc(doc(db_fs,'chargesAuto',id), data); Object.assign(c, data, {_ts:new Date()}); buildIndexes(); renderCharges(); notify('Charge supprimée'); }
+  catch(e){ notify('Erreur : ' + (e?.message || e), 'err'); }
+};
+
+/* Relecture complète (sans cache) des collections qui alimentent les charges
+   automatiques, puis comparaison avec le nombre de documents dans Firebase. */
+const RELECTURE_COLS = [
+  { col:'depenses',    label:'Dépenses commerciaux' },
+  { col:'stockMvts',   label:'Mouvements de stock' },
+  { col:'articles',    label:'Articles (prix d\'achat)' },
+  { col:'commerciaux', label:'Commerciaux (noms)' },
+  { col:'fichesPaie',  label:'Fiches de paie payées' },
+  { col:'chargesAuto', label:'Charges déjà enregistrées' },
+];
+window.relireChargesAuto = async function(){
+  if(!db_fs){ notify('Non connecté à Firebase', 'err'); return; }
+  const est = RELECTURE_COLS.reduce((a,c)=>a + (TDB[c.col]||[]).length, 0);
+  if(!confirm(`Relire depuis Firebase toutes les données des charges automatiques ?\n\n${RELECTURE_COLS.map(c=>'• '+c.label).join('\n')}\n\nCoût estimé : environ ${Math.max(est, 100).toLocaleString('fr-FR')} lectures Firestore.`)) return;
+  const btn = document.getElementById('btn-relire-auto'); if(btn){ btn.disabled = true; btn.textContent = '⏳ Lecture en cours…'; }
+  const stats = { reads:0, delta:0, full:[], incr:[], errors:[] };
+  const res = { date: new Date(), cols: [] };
+  for(const c of RELECTURE_COLS){
+    const ligne = { ...c, serveur:null, charges:null, erreur:'' };
+    try{
+      await _fullLoad(c.col, stats, true);
+      ligne.charges = (TDB[c.col]||[]).length;
+    }catch(e){ ligne.erreur = e?.code === 'permission-denied' ? 'Lecture refusée par les règles Firestore' : (e?.message || String(e)); stats.errors.push(c.col); }
+    try{
+      const n = (await _withTimeout(getCountFromServer(collection(db_fs, c.col)), 15000, c.col)).data().count;
+      ligne.serveur = n; stats.reads += Math.max(1, Math.ceil(n/1000));
+    }catch(e){ if(!ligne.erreur) ligne.erreur = 'Comptage impossible : ' + (e?.message || e); }
+    res.cols.push(ligne);
+  }
+  res.reads = stats.reads;
+  AUTO_LECTURE = res;
+  buildIndexes();
+  if(btn){ btn.disabled = false; btn.textContent = '🔄 Relire et enregistrer depuis l\'app TMMB'; }
+  const ecarts = res.cols.filter(l=>l.erreur || (l.serveur !== null && l.charges !== l.serveur));
+  notify(ecarts.length ? `⚠️ Relecture terminée avec ${ecarts.length} écart(s) — voir le rapport` : `✅ Relecture terminée : tout est chargé (≈ ${res.reads.toLocaleString('fr-FR')} lectures)`, ecarts.length ? 'err' : 'ok');
+  const det = document.getElementById('coll-auto-rapport'); if(det) det.open = true;
+  renderCharges();
+  // Lecture terminée : proposer l'enregistrement (rien n'est réécrit s'il est déjà enregistré)
+  if(!stats.errors.includes('depenses') && !stats.errors.includes('chargesAuto')) await enregistrerChargesAuto(true);
+};
+
+/* Rapport de lecture : filtres propres (source, statut, mois, recherche). */
+window.renderRapportLecture = function(){
+  const tb = document.getElementById('tb-auto-rapport'); if(!tb) return;
+  // Bloc « Firebase vs chargé »
+  const cmp = document.getElementById('auto-lecture-cmp');
+  if(cmp){
+    if(!AUTO_LECTURE){
+      cmp.innerHTML = `<div class="tm" style="font-size:12px;">Cliquez sur <strong>🔄 Relire depuis l'app TMMB</strong> pour comparer le nombre de documents présents dans Firebase avec ceux chargés ici.</div>`;
+    } else {
+      const d = AUTO_LECTURE.date;
+      cmp.innerHTML = `<div class="tm" style="font-size:11px;margin-bottom:6px;">Dernière relecture : ${d.toLocaleDateString('fr-FR')} à ${d.toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'})} · ≈ ${AUTO_LECTURE.reads.toLocaleString('fr-FR')} lectures</div>
+        <table class="mini-table"><thead><tr><th>Collection</th><th>Dans Firebase</th><th>Chargés ici</th><th>Résultat</th></tr></thead><tbody>
+        ${AUTO_LECTURE.cols.map(l=>{
+          const ok = !l.erreur && l.serveur !== null && l.serveur === l.charges;
+          return `<tr><td>${esc(l.label)}</td><td>${l.serveur ?? '—'}</td><td>${l.charges ?? '—'}</td>
+            <td>${ok ? '<span class="tag tag-green">✓ complet</span>' : `<span class="tag tag-red">⚠️ ${esc(l.erreur || ('écart de ' + Math.abs((l.serveur||0)-(l.charges||0))))}</span>`}</td></tr>`;
+        }).join('')}</tbody></table>`;
+    }
+  }
+  const src = document.getElementById('rap-src')?.value || '';
+  const st  = document.getElementById('rap-statut')?.value || '';
+  const per = document.getElementById('rap-mois')?.value || '';
+  const q   = _normTxt2(document.getElementById('rap-q')?.value || '');
+  let list = AUTO_AUDIT;
+  if(src) list = list.filter(a=>a.src===src);
+  if(st)  list = list.filter(a=>a.statut===st);
+  if(per) list = list.filter(a=>(a.date||'').startsWith(per));
+  if(q)   list = list.filter(a=>_normTxt2(a.libelle+' '+a.motif).includes(q));
+  list = [...list].sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+  // Compteurs (sur la source et la période choisies, tous statuts)
+  const base = AUTO_AUDIT.filter(a=>(!src||a.src===src) && (!per||(a.date||'').startsWith(per)));
+  const nb = s => base.filter(a=>a.statut===s).length;
+  const sum = document.getElementById('rap-compteurs');
+  if(sum) sum.innerHTML = `<span class="tag tag-green">✓ Chargés : ${nb('chargee')}</span> <span class="tag tag-blue">⏳ Non enregistrés : ${nb('attente')}</span> <span class="tag tag-warn">⚠️ Avec alerte : ${nb('alerte')}</span> <span class="tag" style="color:var(--muted);">Ignorés : ${nb('ignoree')}</span> <span class="tm" style="font-size:11px;">· total ${base.length} document(s) lus</span>`;
+  _setCount('rap-count', list.length);
+  const limit = _listLimitFor('rapportAuto', [src, st, per, q, list.length].join('|'));
+  const shown = list.slice(0, limit);
+  const SRC = { depense:'👤 Dépense', stock:'📦 Stock', fiche:'🧾 Fiche de paie' };
+  const STB = { attente:'<span class="tag tag-blue">⏳ Non enregistrée</span>', chargee:'<span class="tag tag-green">✓ Chargée</span>', alerte:'<span class="tag tag-warn">⚠️ Chargée (alerte)</span>', ignoree:'<span class="tag" style="color:var(--muted);">Ignorée</span>' };
+  tb.innerHTML = list.length===0 ? `<tr><td colspan="6" class="emp">Aucun document pour ce filtre</td></tr>`
+    : shown.map(a=>`<tr>
+        <td class="fw6" style="white-space:nowrap;">${esc(a.date||'—')}</td>
+        <td style="white-space:nowrap;">${SRC[a.src]||a.src}</td>
+        <td>${esc(a.libelle)}</td>
+        <td>${a.montant ? fmt(a.montant) : '—'}</td>
+        <td>${STB[a.statut]||a.statut}</td>
+        <td class="tm" style="font-size:11px;">${esc(a.motif)}</td>
+      </tr>`).join('') + _listMoreRow('rapportAuto', shown.length, list.length, 6);
 };
 
 window.toggleChDoublons = function(){ window._chOnlyDoublons = !window._chOnlyDoublons; renderCharges(); };
@@ -1374,31 +1638,48 @@ window.toggleChDoublons = function(){ window._chOnlyDoublons = !window._chOnlyDo
 function renderAutoCharges(month, cat, search, rg){
   const tb = document.getElementById('tb-auto-charges');
   if(!tb) return;
-  let list = AUTO_DEP.concat(ACHATS, SALAIRES_PAYES);
+  // Bandeau : dépenses lues mais pas encore enregistrées (non comptées)
+  const att = document.getElementById('auto-attente');
+  if(att){
+    const nAtt = DEP_EN_ATTENTE.length, plan = _planChargesAuto();
+    const nMaj = plan.majs.length + plan.retraits.length;
+    att.style.display = (nAtt || nMaj) ? 'flex' : 'none';
+    att.innerHTML = (nAtt || nMaj) ? `<span style="flex:1;">⏳ <strong>${nAtt} dépense(s) lue(s) non enregistrée(s)</strong> (${fmt(DEP_EN_ATTENTE.reduce((a,c)=>a+c.montant,0))}) — <strong>pas encore comptées</strong> dans le résultat${nMaj?` · ${nMaj} mise(s) à jour en attente`:''}.</span>
+      <button class="btn btn-success btn-sm" onclick="enregistrerChargesAuto()">💾 Enregistrer maintenant</button>` : '';
+  }
+  let list = DEP_ECRITES.concat(ACHATS, SALAIRES_PAYES);
   if(rg.erreur) list = [];
   else if(rg.actif) list = list.filter(c=>_inRange(c.date, rg));
   else if(month) list = list.filter(c=>c.date.startsWith(month));
   if(cat) list = list.filter(c=>c.categorie===cat);
   if(search) list = list.filter(c=>(c.libelle||'').toLowerCase().includes(search));
   list.sort((a,b)=>b.date.localeCompare(a.date));
-  const totDep = list.filter(c=>c._auto==='depense').reduce((a,c)=>a+c.montant,0);
+  const totDep = list.filter(c=>c._auto==='depense').reduce((a,c)=>a+c.montant,0);   // enregistrées
   const totAch = list.filter(c=>c._auto==='achat').reduce((a,c)=>a+c.montant,0);
   const totSal = list.filter(c=>c._auto==='salaire').reduce((a,c)=>a+c.montant,0);
   _setCount('auto-count', list.length);
   const sum = document.getElementById('auto-totaux');
-  if(sum) sum.innerHTML = `Salaires payés (fiches) : <strong style="color:var(--red);">${fmt(totSal)}</strong> &nbsp;·&nbsp; Dépenses commerciaux : <strong style="color:var(--red);">${fmt(totDep)}</strong> <span class="tm">(résultat + trésorerie)</span> &nbsp;·&nbsp; Achats stock : <strong style="color:var(--warn);">${fmt(totAch)}</strong> <span class="tm">(trésorerie seulement)</span>`;
+  if(sum) sum.innerHTML = `Salaires payés (fiches) : <strong style="color:var(--red);">${fmt(totSal)}</strong> &nbsp;·&nbsp; Dépenses commerciaux enregistrées : <strong style="color:var(--red);">${fmt(totDep)}</strong> <span class="tm">(résultat + trésorerie)</span> &nbsp;·&nbsp; Achats stock : <strong style="color:var(--warn);">${fmt(totAch)}</strong> <span class="tm">(trésorerie seulement)</span>`;
   const limit = _listLimitFor('autoCharges', [month, cat, search, rg.du, rg.au, list.length].join('|'));
   const shown = list.slice(0, limit);
+  const isAdm = window._userRole === 'admin';
+  const actions = c => {
+    if(c._auto !== 'depense') return '<span class="tm" style="font-size:11px;">—</span>';
+    if(isPeriodeLocked(c.date.slice(0,7))) return '<span title="Période verrouillée">🔒</span>';
+    return `<button class="btn btn-ghost btn-xs" onclick="modifierChargeAuto('${esc(c._caId)}')" title="Modifier">✏️</button>`
+      + (isAdm ? `<button class="btn btn-danger btn-xs" style="margin-left:4px;" onclick="supprimerChargeAuto('${esc(c._caId)}')" title="Supprimer (ne sera pas réécrite)">🗑</button>` : '');
+  };
   tb.innerHTML = list.length===0
-    ? `<tr><td colspan="6" class="emp">Aucune charge automatique sur cette période</td></tr>`
+    ? `<tr><td colspan="7" class="emp">Aucune charge automatique sur cette période</td></tr>`
     : shown.map(c=>`<tr>
         <td class="fw6">${esc(c.date)}</td>
         <td>${c._auto==='achat' ? '<span class="tag tag-warn">📦 Achat stock</span>' : c._auto==='salaire' ? '<span class="tag tag-purple">🧾 Salaire (fiche)</span>' : '<span class="tag tag-blue">👤 Dépense commercial</span>'}</td>
-        <td>${esc(c.libelle)}${c.sansPA?' <span class="tag tag-red" style="font-size:9px;" title="Prix d\'achat de l\'article à 0 ou article introuvable">PA manquant</span>':''}</td>
+        <td>${esc(c.libelle)}${c.sansPA?' <span class="tag tag-red" style="font-size:9px;" title="Prix d\'achat de l\'article à 0 ou article introuvable">PA manquant</span>':''}${c.modifieManuellement?' <span class="tag tag-warn" style="font-size:9px;">modifiée à la main</span>':''}</td>
         <td><span style="font-size:11px;font-weight:600;color:${catColor(c.categorie)};">${esc(c.categorie)}</span></td>
         <td class="tm" style="font-size:11px;">${c._auto==='achat' ? 'Trésorerie' : 'Résultat + trésorerie'}</td>
         <td class="amt-neg">${fmt(c.montant)}</td>
-      </tr>`).join('') + _listMoreRow('autoCharges', shown.length, list.length, 6);
+        <td class="no-print" style="white-space:nowrap;">${actions(c)}</td>
+      </tr>`).join('') + _listMoreRow('autoCharges', shown.length, list.length, 7);
 
   // Panneau de contrôle : natures et types trouvés dans l'app TMMB
   const ctrl = document.getElementById('auto-controle');
@@ -3444,7 +3725,7 @@ function soldeTresorerieCumule(){
                 + TDB.livraisons.filter(l=>l.statut!=='en_attente').reduce((a,l)=>a+Number(l.montant||0),0)
                 + (TDB.adhesionPays||[]).reduce((a,x)=>a+Number(x.montant||0),0);
   const sorties = CHARGES.reduce((a,c)=>a+Number(c.montant||0),0)
-                + AUTO_DEP.reduce((a,c)=>a+Number(c.montant||0),0)
+                + DEP_ECRITES.reduce((a,c)=>a+Number(c.montant||0),0)
                 + ACHATS.reduce((a,c)=>a+Number(c.montant||0),0)
                 + SALAIRES_PAYES.reduce((a,c)=>a+Number(c.montant||0),0);
   return entrees - sorties;
@@ -3511,7 +3792,7 @@ window.renderAutonomie = function(){
   const liv        = coutLivraisonsDuesTotal();
   // [CORRECTIF] totalCharges('','') ne renvoyait rien (année vide) : la ligne affichait 0.
   // Affichage seulement : le capital, lui, intégrait déjà les charges via la trésorerie cumulée.
-  const chargesTot = CHARGES.concat(AUTO_DEP, SALAIRES_PAYES).reduce((a,c)=>a+Number(c.montant||0),0);
+  const chargesTot = CHARGES.concat(DEP_ECRITES, SALAIRES_PAYES).reduce((a,c)=>a+Number(c.montant||0),0);
   const salairesTot= totalSalairesTous();
   const rythme     = rythmeMensuelMoyen();
 
