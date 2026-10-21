@@ -14,7 +14,7 @@ const CUR_MONTH = TODAY.slice(0,7);
 // Données lues depuis TRIOMPHANT (lecture seule)
 let TDB = {
   agences:[], commerciaux:[], clients:[], paiements:[],
-  articles:[], stockMvts:[], livraisons:[], adhesionPays:[], mises:[], depenses:[], fichesPaie:[], chargesAuto:[]
+  articles:[], stockMvts:[], livraisons:[], adhesionPays:[], mises:[], depenses:[], fichesPaie:[], chargesAuto:[], produitsPrive:[]
 };
 
 // Données propres à la comptabilité (lecture/écriture)
@@ -85,6 +85,7 @@ function buildIndexes(){
   IDX.clientsById     = new Map((TDB.clients||[]).map(c=>[c._id,c]));
   IDX.commerciauxById = new Map((TDB.commerciaux||[]).map(c=>[c._id,c]));
   IDX.articlesById    = new Map((TDB.articles||[]).map(a=>[a._id,a]));
+  IDX.prixAchatProduit = new Map((TDB.produitsPrive||[]).map(p=>[p._id, Number(p.prixAchat||0)]));
   IDX.paiementsByMonth  = _groupBy(TDB.paiements,  p=>p.date?p.date.slice(0,7):null);
   IDX.paiementsByClient = _groupBy(TDB.paiements,  p=>p.clientId);
   IDX.livraisonsByMonth  = _groupBy(TDB.livraisons, l=>l.date?l.date.slice(0,7):null);
@@ -667,7 +668,8 @@ function _withTimeout(promise, ms, label){
    ⚠ Ajouter une collection à CACHED_COLS impose d'incrémenter IDB_VER.
 ═══════════════════════════════════════════════════ */
 const CACHED_COLS      = ['clients','paiements','articles','livraisons','adhesionPays','depenses','stockMvts','fichesPaie','chargesAuto'];
-const ALWAYS_FULL_COLS = ['agences','commerciaux'];   // petites, ou sans _ts (commerciaux)
+const ALWAYS_FULL_COLS = ['agences','commerciaux','produitsPrive'];   // petites, ou sans _ts (commerciaux, produitsPrive)
+let PRIX_ACHAT_REFUSE = false;   // true si les règles Firestore refusent la lecture de produitsPrive
 const COUNT_ONLY_COLS  = ['mises'];                   // seulement affichée en nombre
 // stockMvts : téléchargé depuis la v11 (charges automatiques : entrées de stock)
 const IDB_NAME = 'triomphant_compta_cache', IDB_VER = 4;   // v2 : stockMvts · v3 : fichesPaie · v4 : chargesAuto
@@ -886,10 +888,15 @@ async function loadTDBData(opts = {}){
 
   if(_cacheOK){ try{ await _idbOpen(); }catch(e){ _disableCache(e); } }
 
+  PRIX_ACHAT_REFUSE = false;
   for(const col of ALWAYS_FULL_COLS){
     setText(`Chargement : ${col}…`);
     try{ await _fullLoad(col, stats); }
-    catch(e){ console.warn(`Chargement de "${col}" échoué :`, e.message); TDB[col] = TDB[col] || []; stats.errors.push(col); }
+    catch(e){
+      console.warn(`Chargement de "${col}" échoué :`, e.message); TDB[col] = TDB[col] || [];
+      // produitsPrive : lecture réservée à l'admin tant que la règle n'est pas modifiée -> avertissement dédié
+      if(col === 'produitsPrive') PRIX_ACHAT_REFUSE = true; else stats.errors.push(col);
+    }
   }
   for(const col of CACHED_COLS){
     setText(`Synchronisation : ${col}…`);
@@ -905,7 +912,7 @@ async function loadTDBData(opts = {}){
 
   _lastFullSync = Date.now();
   _lastSyncReads = stats.reads;
-  _lastSyncErrors = stats.errors.filter(c=>c!=='agences');
+  _lastSyncErrors = stats.errors.filter(c=>c!=='agences' && c!=='produitsPrive');
   if(_lastSyncErrors.length){
     notify(`⚠️ Chargement incomplet : ${_lastSyncErrors.join(', ')} — les totaux sont FAUX. Cliquez 🔄 Synchroniser pour reprendre.`, 'err');
   }
@@ -1174,15 +1181,58 @@ function totalPaiements(year, month){
    sans prix d'achat sont comptées à part (« ventes sans PA connu ») et signalées :
    principe de prudence, on ne compte pas comme bénéfice ce qu'on ne sait pas mesurer.
    Source du PA : à confirmer par le diagnostic (collection « produits » selon vous). */
-function _paLivraison(l){
-  const art = IDX.articlesById.get(l.articleId) || IDX.articlesById.get(l.produitId);
-  const pa = Number(art?.pa || 0);
-  return pa > 0 ? pa : null;
+/* Prix d'achat UNITAIRE d'un produit livré (vérifié par diagnostic du 21/10/2026) :
+   1. produitsPrive/{produitId}.prixAchat, s'il est > 0 ;
+   2. sinon, composition figée de la livraison : Σ (PA de l'article × quantité),
+      si TOUS les articles sont trouvés avec un PA > 0 ;
+   3. sinon, ancien format (champ articleId) ;
+   4. sinon : inconnu (marge non comptée, livraison signalée). */
+function _paDetail(l){
+  const pp = IDX.prixAchatProduit?.get(l.produitId);
+  if(pp > 0) return { pa: pp, src: 'prixAchat' };
+  const comp = Array.isArray(l.compositionFigee) ? l.compositionFigee : [];
+  if(comp.length){
+    let tot = 0, ok = true;
+    for(const c of comp){
+      const art = IDX.articlesById.get(c.articleId);
+      const pa = Number(art?.pa || 0), q = Number(c.qte || 0);
+      if(!(pa > 0) || !(q > 0)){ ok = false; break; }
+      tot += pa * q;
+    }
+    if(ok && tot > 0) return { pa: tot, src: 'composition' };
+  }
+  const art = IDX.articlesById.get(l.articleId);
+  if(Number(art?.pa) > 0) return { pa: Number(art.pa), src: 'article' };
+  return null;
 }
+function _paLivraison(l){ const d = _paDetail(l); return d ? d.pa : null; }
 function margeLivraison(l){
   const pa = _paLivraison(l);
   if(pa === null) return 0;                       // PA inconnu : rien compté comme marge
   return Number(l.montant||0) - pa*Number(l.qty||1);
+}
+/* Prix d'achat suspects : ≤ 10 FCFA ou supérieur au prix de vente unitaire. */
+const PA_SUSPECT_MAX = 10;
+function _paSuspect(l, d){
+  const pvU = Number(l.pvFige || (Number(l.montant||0) / Math.max(1, Number(l.qty||1))));
+  if(d.pa <= PA_SUSPECT_MAX) return `PA ≤ ${PA_SUSPECT_MAX} FCFA`;
+  if(pvU > 0 && d.pa > pvU) return 'PA supérieur au prix de vente';
+  return '';
+}
+/* Contrôle des prix d'achat des livraisons d'une période. */
+function controlePrixAchat(year, month){
+  const livs = _monthlyRange(IDX.livraisonsByMonth, year, month).filter(l=>l.statut!=='en_attente');
+  const res = { total: livs.length, prixAchat:0, composition:0, article:0, introuvable:0, produits:new Map() };
+  livs.forEach(l=>{
+    const d = _paDetail(l);
+    const key = l.produitId || l.articleId || '?';
+    const p = res.produits.get(key) || { id:key, nom: l.produitNom || IDX.articlesById.get(l.articleId)?.nom || key, nb:0, ventes:0, pa:null, src:'', pv:Number(l.pvFige||0), motif:'' };
+    p.nb++; p.ventes += Number(l.montant||0);
+    if(!d){ res.introuvable++; p.motif = 'Prix d\'achat introuvable'; }
+    else { res[d.src]++; p.pa = d.pa; p.src = d.src; const m = _paSuspect(l, d); if(m) p.motif = m; }
+    res.produits.set(key, p);
+  });
+  return res;
 }
 function totalLivraisons(year, month){
   return _monthlyRange(IDX.livraisonsByMonth, year, month)
@@ -1195,9 +1245,34 @@ function livraisonsSansPA(year, month){
   return { nb: arr.length, ventes: arr.reduce((a,l)=>a+Number(l.montant||0),0) };
 }
 function _alerteSansPA(year, month){
+  const c = controlePrixAchat(year, month);
+  const suspects = [...c.produits.values()].filter(p=>p.motif && p.pa!==null);
+  const sans = [...c.produits.values()].filter(p=>p.pa===null);
   const s = livraisonsSansPA(year, month);
-  if(!s.nb) return '';
-  return `<div class="alert alert-warn" style="margin:8px 0;font-size:12px;">⚠️ <strong>${s.nb} livraison(s)</strong> (ventes ${fmt(s.ventes)}) : prix d'achat introuvable, <strong>marge non comptée</strong>. Le prix d'achat des produits livrés doit être relié (diagnostic en cours).</div>`;
+  let html = '';
+  if(PRIX_ACHAT_REFUSE) html += `<div class="alert alert-danger" style="margin:8px 0;font-size:12px;">⛔ Lecture des prix d'achat (<code>produitsPrive</code>) refusée par les règles Firestore pour ce compte : la marge n'utilise que la composition des produits. Demandez à l'administrateur d'autoriser les comptables (voir notice).</div>`;
+  if(s.nb) html += `<div class="alert alert-warn" style="margin:8px 0;font-size:12px;">⚠️ <strong>${s.nb} livraison(s)</strong> (ventes ${fmt(s.ventes)}) : prix d'achat introuvable, <strong>marge non comptée</strong>. Voir « Contrôle des prix d'achat » ci-dessous.</div>`;
+  if(!c.total) return html;
+  const lignes = [...sans, ...suspects].sort((a,b)=>b.ventes-a.ventes);
+  const SRC = { prixAchat:'produitsPrive', composition:'composition', article:'article' };
+  html += `<details class="coll no-print" id="coll-controle-pa" ${lignes.length?'open':''}>
+    <summary class="coll-sum"><span class="coll-title">🔎 Contrôle des prix d'achat ${lignes.length?`<span class="coll-count" style="color:var(--warn);">(${lignes.length} produit(s) à vérifier)</span>`:'<span class="coll-count">(tout est relié)</span>'}</span><span class="coll-hint">${c.total} livraison(s) sur la période</span></summary>
+    <div class="card">
+      <div style="font-size:12px;margin-bottom:10px;">
+        Prix d'achat trouvé par : <span class="tag tag-green">produitsPrive : ${c.prixAchat}</span>
+        <span class="tag tag-blue">composition : ${c.composition}</span>
+        ${c.article?`<span class="tag tag-purple">ancien format : ${c.article}</span>`:''}
+        <span class="tag ${c.introuvable?'tag-red':'tag-green'}">introuvable : ${c.introuvable}</span>
+      </div>
+      ${lignes.length ? `<table class="mini-table"><thead><tr><th>Produit</th><th>Livraisons</th><th>Ventes</th><th>PV unitaire</th><th>PA utilisé</th><th>Problème</th></tr></thead><tbody>
+        ${lignes.map(p=>`<tr><td>${esc(p.nom)}<br><span class="tm" style="font-size:10px;">${esc(p.id)}</span></td><td>${p.nb}</td><td>${fmt(p.ventes)}</td><td>${p.pv?fmt(p.pv):'—'}</td>
+          <td>${p.pa===null?'—':fmt(p.pa)+` <span class="tm" style="font-size:10px;">(${SRC[p.src]})</span>`}</td>
+          <td><span class="tag ${p.pa===null?'tag-red':'tag-warn'}">${esc(p.motif)}</span></td></tr>`).join('')}
+      </tbody></table>
+      <div class="tm" style="font-size:11px;margin-top:8px;">À corriger dans l'app TMMB (fiche produit : prix d'achat), puis cliquez sur 🔄 Synchroniser. Les PA suspects sont utilisés tels quels.</div>` : '<div class="tm" style="font-size:12px;">✅ Toutes les livraisons de la période ont un prix d\'achat plausible.</div>'}
+    </div>
+  </details>`;
+  return html;
 }
 function getClientsPayesNonLivres(year, month){
   // Clients ayant payé (sur la période) mais sans livraison avec statut 'livre'
@@ -2102,10 +2177,11 @@ function _journalData(){
   src(IDX.livraisonsByMonth)
     .filter(l=>l.statut!=='en_attente')
     .forEach(l=>{
-      const art = IDX.articlesById.get(l.articleId)||IDX.articlesById.get(l.produitId)||{nom:'?',pa:0};
+      const nomP = l.produitNom || IDX.articlesById.get(l.articleId)?.nom || '?';
       const cl  = IDX.clientsById.get(l.clientId)||{nom:'?'};
+      const pa  = _paLivraison(l);
       const marge = margeLivraison(l);
-      ecritures.push({date:l.date,piece:'LIV-'+String(pieceNum++).padStart(4,'0'),type:'livraison',libelle:`Livraison ${art.nom} – ${cl.nom} (×${l.qty}) | PV:${fmt(Number(l.montant||0))} PA:${fmt(Number(art.pa||0)*Number(l.qty||1))}`,debit:0,credit:marge});
+      ecritures.push({date:l.date,piece:'LIV-'+String(pieceNum++).padStart(4,'0'),type:'livraison',libelle:`Livraison ${nomP} – ${cl.nom} (×${l.qty}) | PV:${fmt(Number(l.montant||0))} PA:${pa===null?'inconnu (marge non comptée)':fmt(pa*Number(l.qty||1))}`,debit:0,credit:marge});
     });
 
   // Adhésions → PRODUIT
