@@ -531,6 +531,10 @@ details.coll[open] > .coll-sum::before{transform:rotate(90deg);}
 @media(max-width:860px){ .coll-hint{display:none;} .date-range{width:100%;} .date-range input[type=date]{flex:1;width:auto!important;} }
 @media print{ .coll-sum{display:none!important;} }
 
+.mini-table{width:100%;border-collapse:collapse;font-size:12px;}
+.mini-table th{text-align:left;color:var(--muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.5px;padding:6px 8px;border-bottom:1px solid var(--border);}
+.mini-table td{padding:6px 8px;border-bottom:1px solid rgba(35,45,69,.5);}
+
 /* ═══════════════════════════════════════════════════
    CADRAN CARBURATION / VIDANGE (fiche de paie, écran seulement)
 ═══════════════════════════════════════════════════ */

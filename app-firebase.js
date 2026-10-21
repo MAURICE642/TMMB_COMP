@@ -1167,16 +1167,37 @@ function totalPaiements(year, month){
   return _monthlyRange(IDX.paiementsByMonth, year, month)
     .reduce((a,p)=>a+Number(p.montant||0),0);
 }
+/* [CORRECTIF MARGE] Avant : l'article était cherché via « l.articleId », un champ
+   absent des livraisons TMMB (elles ont « produitId »). Le prix d'achat valait donc 0
+   et la « marge » affichée était en réalité le prix de vente × quantité.
+   Maintenant : la marge n'est comptée QUE si le prix d'achat est connu. Les livraisons
+   sans prix d'achat sont comptées à part (« ventes sans PA connu ») et signalées :
+   principe de prudence, on ne compte pas comme bénéfice ce qu'on ne sait pas mesurer.
+   Source du PA : à confirmer par le diagnostic (collection « produits » selon vous). */
+function _paLivraison(l){
+  const art = IDX.articlesById.get(l.articleId) || IDX.articlesById.get(l.produitId);
+  const pa = Number(art?.pa || 0);
+  return pa > 0 ? pa : null;
+}
 function margeLivraison(l){
-  // Revenu livraison = montant vente - coût produit (pa * qty)
-  const art = IDX.articlesById.get(l.articleId);
-  const cout = art ? Number(art.pa||0)*Number(l.qty||1) : 0;
-  return Number(l.montant||0) - cout;
+  const pa = _paLivraison(l);
+  if(pa === null) return 0;                       // PA inconnu : rien compté comme marge
+  return Number(l.montant||0) - pa*Number(l.qty||1);
 }
 function totalLivraisons(year, month){
   return _monthlyRange(IDX.livraisonsByMonth, year, month)
     .filter(l=>l.statut!=='en_attente')
     .reduce((a,l)=>a+margeLivraison(l),0);
+}
+/* Livraisons dont la marge n'a pas pu être calculée (prix d'achat introuvable). */
+function livraisonsSansPA(year, month){
+  const arr = _monthlyRange(IDX.livraisonsByMonth, year, month).filter(l=>l.statut!=='en_attente' && _paLivraison(l)===null);
+  return { nb: arr.length, ventes: arr.reduce((a,l)=>a+Number(l.montant||0),0) };
+}
+function _alerteSansPA(year, month){
+  const s = livraisonsSansPA(year, month);
+  if(!s.nb) return '';
+  return `<div class="alert alert-warn" style="margin:8px 0;font-size:12px;">⚠️ <strong>${s.nb} livraison(s)</strong> (ventes ${fmt(s.ventes)}) : prix d'achat introuvable, <strong>marge non comptée</strong>. Le prix d'achat des produits livrés doit être relié (diagnostic en cours).</div>`;
 }
 function getClientsPayesNonLivres(year, month){
   // Clients ayant payé (sur la période) mais sans livraison avec statut 'livre'
@@ -1290,7 +1311,7 @@ window.renderDashboard = function(){
     const d = new Date(parseInt(year),i,1);
     const mm = String(i+1).padStart(2,'0');
     evoLabels.push(moisNoms[i]);
-    evoProd.push(totalPaiements(year,mm)+totalLivraisons(year,mm)+totalAdhesions(year,mm));
+    evoProd.push(totalLivraisons(year,mm)+totalAdhesions(year,mm));   // [CORRECTIF] sans les cotisations
     evoChrg.push(totalCharges(year,mm));
   }
   if(chartEvo){chartEvo.destroy();chartEvo=null;}
@@ -1340,6 +1361,7 @@ window.renderDashboard = function(){
   // Alertes
   const alertes = [];
   if(charges>produits) alertes.push({type:'danger',msg:'⚠️ Charges supérieures aux produits — déficit '+fmt(charges-produits)});
+  { const sp = livraisonsSansPA(year, month); if(sp.nb) alertes.push({type:'warn',msg:`⚠️ ${sp.nb} livraison(s) sans prix d'achat connu (ventes ${fmt(sp.ventes)}) : leur marge n'est pas comptée`}); }
   if(CHARGES.length===0) alertes.push({type:'warn',msg:'📝 Aucune charge enregistrée — ajoutez vos dépenses pour un compte de résultat précis'});
   if(TDB.paiements.length===0) alertes.push({type:'warn',msg:'🔌 Aucune donnée TRIOMPHANT chargée — synchronisez avec Firebase'});
   const pEn = TDB.livraisons.filter(l=>l.statut==='en_attente').length;
@@ -1364,12 +1386,18 @@ window.renderCharges = function(){
   const monthEl = document.getElementById('ch-month');
   if(monthEl){ monthEl.disabled = rg.actif; monthEl.title = rg.actif ? 'Ignoré : la plage « du / au » est utilisée' : ''; }
 
-  let list = [...CHARGES];
+  // [LISTE UNIQUE] Charges saisies + dépenses TMMB enregistrées + salaires des fiches payées :
+  // affichées et totalisées ensemble, comme les charges du compte de résultat.
+  let list = CHARGES.map(c=>({...c, _src:'manuel'}))
+    .concat(DEP_ECRITES.map(c=>({...c, _src:'auto', mode:'App TMMB'})))
+    .concat(SALAIRES_PAYES.map(c=>({...c, _src:'fiche'})));
   if(rg.erreur) list = [];
   else if(rg.actif) list = list.filter(c=>_inRange(c.date, rg));   // la plage remplace le mois
   else if(month) list=list.filter(c=>c.date&&c.date.startsWith(month));
   if(cat)   list=list.filter(c=>c.categorie===cat);
   if(search) list=list.filter(c=>(c.libelle||'').toLowerCase().includes(search)||(c.ref||'').toLowerCase().includes(search));
+  const srcF = document.getElementById('ch-src')?.value || '';
+  if(srcF) list = list.filter(c=>c._src===srcF);
   list.sort((a,b)=>(b.date||'').localeCompare(a.date||''));
 
   const total = list.reduce((a,c)=>a+Number(c.montant||0),0);
@@ -1386,8 +1414,8 @@ window.renderCharges = function(){
   const autoKeys = new Set(DEP_ECRITES.concat(DEP_EN_ATTENTE, ACHATS).map(a=>a.date+'|'+Math.round(a.montant)));
   // Salaires : même MOIS et même montant que le brut d'une fiche payée (saisie souvent faite le jour du paiement)
   const salKeys  = new Set(SALAIRES_PAYES.map(a=>a.date.slice(0,7)+'|'+Math.round(a.montant)));
-  const isDoublon = c => autoKeys.has((c.date||'')+'|'+Math.round(Number(c.montant||0)))
-                      || salKeys.has((c.date||'').slice(0,7)+'|'+Math.round(Number(c.montant||0)));
+  const isDoublon = c => c._src==='manuel' && autoKeys.has((c.date||'')+'|'+Math.round(Number(c.montant||0)))
+                      || (c._src==='manuel' && salKeys.has((c.date||'').slice(0,7)+'|'+Math.round(Number(c.montant||0))));
   const nbDoublons = list.filter(isDoublon).length;
   if(!nbDoublons) window._chOnlyDoublons = false;
   if(window._chOnlyDoublons) list = list.filter(isDoublon);
@@ -1398,13 +1426,31 @@ window.renderCharges = function(){
       <button class="btn btn-ghost btn-xs" style="margin-left:8px;" onclick="toggleChDoublons()">${window._chOnlyDoublons ? '↩ Afficher toutes les charges' : '🔍 Afficher uniquement les doublons'}</button>` : '';
   }
   _setCount('ch-count', list.length);
-  const limit = _listLimitFor('charges', [month, cat, search, rg.du, rg.au, !!window._chOnlyDoublons, list.length].join('|'));
+  const limit = _listLimitFor('charges', [month, cat, search, srcF, rg.du, rg.au, !!window._chOnlyDoublons, list.length].join('|'));
   const shown = list.slice(0, limit);
   document.getElementById('tb-charges').innerHTML=list.length===0
     ? `<tr><td colspan="9" class="emp">${rg.erreur ? esc(rg.erreur) : 'Aucune charge trouvée'}</td></tr>`
     : shown.map(c=>{
       const period = (c.date||'').substring(0,7);
       const locked = isPeriodeLocked(period);
+      if(c._src !== 'manuel'){
+        const tag = c._src==='auto' ? '<span class="tag tag-blue" style="font-size:9px;">auto TMMB</span>' : '<span class="tag tag-purple" style="font-size:9px;">fiche de paie</span>';
+        const act = locked ? '<span title="Période verrouillée" style="font-size:13px;opacity:0.5;">🔒</span>'
+          : c._src==='auto'
+            ? `<button class="btn btn-ghost btn-xs" onclick="modifierChargeAuto('${esc(c._caId)}')" title="Modifier">✏️</button>${(window._userRole==='admin')?`<button class="btn btn-danger btn-xs" onclick="supprimerChargeAuto('${esc(c._caId)}')" style="margin-left:4px;" title="Supprimer (ne sera pas réécrite)">🗑</button>`:''}`
+            : `<button class="btn btn-ghost btn-xs" onclick="ouvrirFichePaie('commercial');voirFichePayee('${esc(c.ficheId)}')" title="Voir la fiche payée">👁</button>`;
+        return `<tr>
+        <td class="fw6">${esc(c.date)}</td>
+        <td class="tm">—</td>
+        <td>${esc(c.libelle)} ${tag}${c.modifieManuellement?' <span class="tag tag-warn" style="font-size:9px;">modifiée à la main</span>':''}</td>
+        <td><span style="display:inline-flex;align-items:center;font-size:11px;font-weight:600;color:${catColor(c.categorie)};"><span class="type-dot" style="background:${catColor(c.categorie)}"></span>${esc(c.categorie)}</span></td>
+        <td class="tm">${esc(c.mode||'—')}</td>
+        <td class="tm" style="font-size:11px;">—</td>
+        <td class="tm">—</td>
+        <td class="amt-neg">${fmt(c.montant)} ${locked?'<span class="lock-badge" style="font-size:9px;">🔒</span>':''}</td>
+        <td class="no-print" style="white-space:nowrap;">${act}</td>
+      </tr>`;
+      }
       const pjCell = c.pj
         ? `<img src="${c.pj}" class="pj-thumb" onclick="viewPJ('${c._id}')" title="Voir la pièce jointe">`
         : `<span class="pj-placeholder" onclick="openModalCharge('${esc(c._id)}')" title="Ajouter une pièce jointe">📎</span>`;
@@ -1647,7 +1693,9 @@ function renderAutoCharges(month, cat, search, rg){
     att.innerHTML = (nAtt || nMaj) ? `<span style="flex:1;">⏳ <strong>${nAtt} dépense(s) lue(s) non enregistrée(s)</strong> (${fmt(DEP_EN_ATTENTE.reduce((a,c)=>a+c.montant,0))}) — <strong>pas encore comptées</strong> dans le résultat${nMaj?` · ${nMaj} mise(s) à jour en attente`:''}.</span>
       <button class="btn btn-success btn-sm" onclick="enregistrerChargesAuto()">💾 Enregistrer maintenant</button>` : '';
   }
-  let list = DEP_ECRITES.concat(ACHATS, SALAIRES_PAYES);
+  // Les dépenses enregistrées et les salaires sont dans la liste des charges ci-dessus.
+  // Ici : seulement les achats de stock (trésorerie, hors compte de résultat).
+  let list = ACHATS.slice();
   if(rg.erreur) list = [];
   else if(rg.actif) list = list.filter(c=>_inRange(c.date, rg));
   else if(month) list = list.filter(c=>c.date.startsWith(month));
@@ -1659,7 +1707,7 @@ function renderAutoCharges(month, cat, search, rg){
   const totSal = list.filter(c=>c._auto==='salaire').reduce((a,c)=>a+c.montant,0);
   _setCount('auto-count', list.length);
   const sum = document.getElementById('auto-totaux');
-  if(sum) sum.innerHTML = `Salaires payés (fiches) : <strong style="color:var(--red);">${fmt(totSal)}</strong> &nbsp;·&nbsp; Dépenses commerciaux enregistrées : <strong style="color:var(--red);">${fmt(totDep)}</strong> <span class="tm">(résultat + trésorerie)</span> &nbsp;·&nbsp; Achats stock : <strong style="color:var(--warn);">${fmt(totAch)}</strong> <span class="tm">(trésorerie seulement)</span>`;
+  if(sum) sum.innerHTML = `Achats stock : <strong style="color:var(--warn);">${fmt(totAch)}</strong> <span class="tm">(trésorerie seulement)</span>`;
   const limit = _listLimitFor('autoCharges', [month, cat, search, rg.du, rg.au, list.length].join('|'));
   const shown = list.slice(0, limit);
   const isAdm = window._userRole === 'admin';
@@ -1922,7 +1970,10 @@ window.renderResultat = function(){
   const recAdh  = totalAdhesions(year,month);
   const projRes       = projectionClientsRestants(year,month);
   const recLivEnCours  = projRes.marge;
-  const totalProd = recPay+recLiv+recAdh;
+  // [CORRECTIF] Les cotisations (recPay) étaient ADDITIONNÉES aux produits alors que
+  // l'écran les présentait comme « non comptabilisées » : bénéfice surestimé.
+  // Total des entrées = marge des livraisons + adhésions. Le collecté est affiché à part.
+  const totalProd = recLiv+recAdh;
   const totalProdAvecEnCours = totalProd+recLivEnCours;
 
   const catMap  = chargesParCat(year,month);
@@ -1938,19 +1989,26 @@ window.renderResultat = function(){
     </div>`;
 
   document.getElementById('res-container').innerHTML=`
+    <div class="kpi-row kpi-4">
+      <div class="kpi-card kc-blue"><div class="kpi-lbl">Total collecté</div><div class="kpi-val kv-blue">${fmt(recPay)}</div><div class="kpi-sub">Cotisations : dette envers les clients, pas une entrée</div></div>
+      <div class="kpi-card kc-green"><div class="kpi-lbl">Total des entrées</div><div class="kpi-val kv-green">${fmt(totalProd)}</div><div class="kpi-sub">Marge des livraisons + adhésions</div></div>
+      <div class="kpi-card kc-red"><div class="kpi-lbl">Total des sorties</div><div class="kpi-val kv-red">${fmt(totalChrg)}</div><div class="kpi-sub">Charges saisies, dépenses enregistrées, salaires payés</div></div>
+      <div class="kpi-card ${resultat>=0?'kc-green':'kc-red'}"><div class="kpi-lbl">${resultat>=0?'Bénéfice net':'Déficit net'}</div><div class="kpi-val" style="color:${resultat>=0?'var(--accent2)':'var(--red)'};">${fmt(resultat)}</div><div class="kpi-sub">Entrées − sorties</div></div>
+    </div>
+    ${_alerteSansPA(year, month)}
     <div class="card" style="margin-bottom:16px;">
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
         <div>
-          <div class="card-title" style="color:var(--accent2);">📥 PRODUITS — ${periodLabel(year,month)}</div>
+          <div class="card-title" style="color:var(--accent2);">📥 ENTRÉES — ${periodLabel(year,month)}</div>
           ${row('Marge livraisons (PV − PA)',recLiv,true,'var(--accent2)')}
           ${row('Adhésions clients',recAdh,true,'var(--accent2)')}
           <div class="bilan-row total-row">
-            <span>TOTAL PRODUITS (livrés)</span><span class="amt-pos">${fmt(totalProd)}</span>
+            <span>TOTAL DES ENTRÉES</span><span class="amt-pos">${fmt(totalProd)}</span>
           </div>
           <div style="margin-top:8px;padding:8px 14px;background:rgba(108,143,255,0.06);border:1px solid rgba(108,143,255,0.18);border-radius:8px;">
-            <div style="font-size:10px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:0.7px;margin-bottom:4px;">📥 Épargne collectée (passif)</div>
-            ${row('Mises clients reçues',recPay,true,'var(--muted)')}
-            <div style="font-size:10px;color:var(--muted);margin-top:2px;">→ Dette envers clients, non comptabilisée en produits</div>
+            <div style="font-size:10px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:0.7px;margin-bottom:4px;">💰 Total collecté (information)</div>
+            ${row('Cotisations clients reçues',recPay,true,'var(--muted)')}
+            <div style="font-size:10px;color:var(--muted);margin-top:2px;">→ Dette envers les clients : n'est PAS une entrée, non comptée dans le bénéfice</div>
           </div>
           ${recLivEnCours>0?`
           <div style="margin-top:10px;padding:10px 14px;background:rgba(249,200,70,0.07);border:1px solid rgba(249,200,70,0.2);border-radius:8px;">
@@ -1963,17 +2021,17 @@ window.renderResultat = function(){
           </div>`:''}
         </div>
         <div>
-          <div class="card-title" style="color:var(--red);">📤 CHARGES — ${periodLabel(year,month)}</div>
+          <div class="card-title" style="color:var(--red);">📤 SORTIES — ${periodLabel(year,month)}</div>
           ${Object.keys(catMap).length===0
             ? '<div class="emp" style="padding:20px;font-size:12px;">Aucune charge saisie</div>'
             : Object.entries(catMap).map(([k,v])=>row(k,v,true,'var(--red)')).join('')}
           <div class="bilan-row total-row">
-            <span>TOTAL CHARGES</span><span class="amt-neg">${fmt(totalChrg)}</span>
+            <span>TOTAL DES SORTIES</span><span class="amt-neg">${fmt(totalChrg)}</span>
           </div>
         </div>
       </div>
       <div class="bilan-row result-row" style="margin-top:14px;">
-        <span>${resultat>=0?'✅ BÉNÉFICE NET (livrés)':'❌ DÉFICIT NET'}</span>
+        <span>${resultat>=0?'✅ BÉNÉFICE NET':'❌ DÉFICIT NET'} (entrées − sorties)</span>
         <span style="color:${resultat>=0?'var(--accent2)':'var(--red)'};">${fmt(Math.abs(resultat))}</span>
       </div>
       ${recLivEnCours>0?`
@@ -1983,7 +2041,7 @@ window.renderResultat = function(){
       </div>`:''}
       <div style="display:flex;gap:20px;margin-top:10px;padding:0 4px;font-size:12px;color:var(--muted);">
         <span>Taux de marge : <strong style="color:${resultat>=0?'var(--accent2)':'var(--red)'};">${tx}%</strong></span>
-        <span>Charges / Produits : <strong style="color:var(--warn);">${totalProd>0?((totalChrg/totalProd)*100).toFixed(1):0}%</strong></span>
+        <span>Sorties / Entrées : <strong style="color:var(--warn);">${totalProd>0?((totalChrg/totalProd)*100).toFixed(1):0}%</strong></span>
       </div>
     </div>`;
 
@@ -1992,7 +2050,7 @@ window.renderResultat = function(){
   const labels=[], dataRes=[], colors=[];
   for(let i=0;i<12;i++){
     const mm=String(i+1).padStart(2,'0');
-    const p=totalPaiements(year,mm)+totalLivraisons(year,mm)+totalAdhesions(year,mm);
+    const p=totalLivraisons(year,mm)+totalAdhesions(year,mm);   // [CORRECTIF] sans les cotisations
     const c=totalCharges(year,mm);
     const r=p-c;
     labels.push(moisNoms[i]);
@@ -2044,7 +2102,7 @@ function _journalData(){
   src(IDX.livraisonsByMonth)
     .filter(l=>l.statut!=='en_attente')
     .forEach(l=>{
-      const art = IDX.articlesById.get(l.articleId)||{nom:'?',pa:0};
+      const art = IDX.articlesById.get(l.articleId)||IDX.articlesById.get(l.produitId)||{nom:'?',pa:0};
       const cl  = IDX.clientsById.get(l.clientId)||{nom:'?'};
       const marge = margeLivraison(l);
       ecritures.push({date:l.date,piece:'LIV-'+String(pieceNum++).padStart(4,'0'),type:'livraison',libelle:`Livraison ${art.nom} – ${cl.nom} (×${l.qty}) | PV:${fmt(Number(l.montant||0))} PA:${fmt(Number(art.pa||0)*Number(l.qty||1))}`,debit:0,credit:marge});
@@ -3635,7 +3693,9 @@ window.renderTresorerie = function(){
 
   // ENTRÉES
   const entPaiements  = totalPaiements(year, month);
-  const entLivraisons = _monthlyRange(IDX.livraisonsByMonth, year, month).filter(l=>l.statut!=='en_attente').reduce((a,l)=>a+Number(l.montant||0),0);
+  // [CORRECTIF] Les livraisons ne sont plus comptées comme rentrée d'argent :
+  // le client les a payées par ses cotisations, déjà comptées ci-dessus.
+  const entLivraisons = 0;
   const entAdhesions  = totalAdhesions(year, month);
   const totalEntrees  = entPaiements + entLivraisons + entAdhesions;
 
@@ -3659,7 +3719,7 @@ window.renderTresorerie = function(){
   const entreesEl = document.getElementById('cf-entrees');
   if(entreesEl) entreesEl.innerHTML=`
     <div class="cf-row"><span>💰 Cotisations clients</span><span class="cf-in">${fmt(entPaiements)}</span></div>
-    <div class="cf-row"><span>📦 Produits livraisons</span><span class="cf-in">${fmt(entLivraisons)}</span></div>
+
     <div class="cf-row"><span>🤝 Adhésions</span><span class="cf-in">${fmt(entAdhesions)}</span></div>
     <div class="cf-row cf-total"><span>TOTAL ENTRÉES</span><span class="cf-net-pos">${fmt(totalEntrees)}</span></div>`;
 
@@ -3679,9 +3739,7 @@ window.renderTresorerie = function(){
   const labels=[], dataIn=[], dataOut=[], dataNet=[];
   for(let i=0;i<12;i++){
     const m=String(i+1).padStart(2,'0');
-    const ein = totalPaiements(year,m)
-              + _monthlyRange(IDX.livraisonsByMonth, year, m).filter(l=>l.statut!=='en_attente').reduce((a,l)=>a+Number(l.montant||0),0)
-              + totalAdhesions(year,m);
+    const ein = totalPaiements(year,m) + totalAdhesions(year,m);   // [CORRECTIF] sans les livraisons
     const eout= totalCharges(year,m) + totalAchatsStock(year,m);
     labels.push(moisNoms[i]); dataIn.push(ein); dataOut.push(eout); dataNet.push(ein-eout);
   }
@@ -3722,7 +3780,6 @@ function valeurStockTotal(){
 }
 function soldeTresorerieCumule(){
   const entrees = TDB.paiements.reduce((a,p)=>a+Number(p.montant||0),0)
-                + TDB.livraisons.filter(l=>l.statut!=='en_attente').reduce((a,l)=>a+Number(l.montant||0),0)
                 + (TDB.adhesionPays||[]).reduce((a,x)=>a+Number(x.montant||0),0);
   const sorties = CHARGES.reduce((a,c)=>a+Number(c.montant||0),0)
                 + DEP_ECRITES.reduce((a,c)=>a+Number(c.montant||0),0)

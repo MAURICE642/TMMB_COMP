@@ -213,6 +213,12 @@
             <option value="Divers">Divers</option>
           </select>
           <input type="text" id="ch-search" class="form-control" placeholder="Rechercher…" style="font-size:12px;" oninput="renderCharges()">
+          <select id="ch-src" class="form-control" style="font-size:12px;" onchange="renderCharges()" title="Origine de la charge">
+            <option value="">Toutes origines</option>
+            <option value="manuel">Saisies à la main</option>
+            <option value="auto">Dépenses TMMB (auto)</option>
+            <option value="fiche">Salaires (fiches payées)</option>
+          </select>
           <span class="date-range" title="Plage de dates : remplace le mois si elle est renseignée">
             <label for="ch-du">Du</label><input type="date" id="ch-du" class="form-control" style="font-size:12px;" onchange="renderCharges()">
             <label for="ch-au">au</label><input type="date" id="ch-au" class="form-control" style="font-size:12px;" onchange="renderCharges()">
@@ -235,7 +241,7 @@
         </details>
 
         <details class="coll" id="coll-auto-charges" open>
-        <summary class="coll-sum"><span class="coll-title">⚙️ Charges automatiques — app TMMB et fiches payées <span class="coll-count" id="auto-count"></span></span><span class="coll-hint">dépenses enregistrées modifiables · mêmes filtres que ci-dessus</span></summary>
+        <summary class="coll-sum"><span class="coll-title">⚙️ Lecture de l'app TMMB · achats de stock (trésorerie) <span class="coll-count" id="auto-count"></span></span><span class="coll-hint">les dépenses enregistrées sont dans la liste des charges ci-dessus</span></summary>
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 10px 2px;">
           <div style="font-size:12px;flex:1;" id="auto-totaux"></div>
           <button class="btn btn-primary btn-sm no-print" id="btn-relire-auto" onclick="relireChargesAuto()" title="Relit depuis Firebase, sans cache, puis enregistre les nouvelles dépenses (jamais de doublon)">🔄 Relire et enregistrer depuis l'app TMMB</button>
