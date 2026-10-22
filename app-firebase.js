@@ -1239,6 +1239,13 @@ function totalLivraisons(year, month){
     .filter(l=>l.statut!=='en_attente')
     .reduce((a,l)=>a+margeLivraison(l),0);
 }
+/* Ventes des livraisons réalisées : prix de vente × quantité (champ montant,
+   vérifié = pvFige × qty par le diagnostic du 21/10/2026). */
+function totalVentesLivraisons(year, month){
+  return _monthlyRange(IDX.livraisonsByMonth, year, month)
+    .filter(l=>l.statut!=='en_attente')
+    .reduce((a,l)=>a+Number(l.montant||0),0);
+}
 /* Livraisons dont la marge n'a pas pu être calculée (prix d'achat introuvable). */
 function livraisonsSansPA(year, month){
   const arr = _monthlyRange(IDX.livraisonsByMonth, year, month).filter(l=>l.statut!=='en_attente' && _paLivraison(l)===null);
@@ -1951,13 +1958,16 @@ window.renderBilan = function(){
 
   // ACTIF
   const totalCollectes = totalPaiements(year,'');            // épargne clients = dette
-  const totalLiv       = totalLivraisons(year,'');           // marge livraisons réalisées
+  const totalLiv       = totalLivraisons(year,'');           // marge livraisons (pour le bénéfice)
+  const ventesLiv      = totalVentesLivraisons(year,'');     // PV × quantité livrée (pour l'actif)
   const totalAdh       = totalAdhesions(year,'');
   const projBilan      = projectionClientsRestants(year,'');
   const livEnCours     = projBilan.marge;
   const valStock       = TDB.articles.reduce((a,art)=>a+Number(art.stock||0)*Number(art.pa||0),0);
-  const totalProduits  = totalLiv + totalAdh;                // vrais produits
-  const totalActif     = totalProduits + valStock;
+  const totalProduits  = totalLiv + totalAdh;                // marge + adhésions : sert au bénéfice
+  // [BILAN] L'actif utilise les VENTES des livraisons (PV × quantité), plus la marge.
+  // Le bénéfice reste calculé sur la marge, identique au compte de résultat.
+  const totalActif     = ventesLiv + totalAdh + valStock;
   const totalActifProj = totalActif + livEnCours;
 
   // PASSIF
@@ -1965,7 +1975,8 @@ window.renderBilan = function(){
   const detteClients   = totalCollectes;                     // épargne à reverser en produits
   const resultatNet    = totalProduits - totalChrg;
   const resultatNetProj = resultatNet + livEnCours;
-  const totalPassif    = detteClients + totalChrg + Math.max(resultatNet,0);
+  // [BILAN] Épargne des clients retirée du passif (demande du 22/10/2026).
+  const totalPassif    = totalChrg + Math.max(resultatNet,0);
 
   const row=(label,val,indent=false,accent='var(--text)')=>`
     <div class="bilan-row ${indent?'bilan-indent':''}">
@@ -1978,7 +1989,7 @@ window.renderBilan = function(){
       <div class="card-title" style="color:var(--accent2);">🟢 ACTIF — ${year}</div>
       <div class="bilan-section">
         <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;padding:6px 12px 2px;letter-spacing:0.7px;">Actif circulant (livrés)</div>
-        ${row('Marge livraisons réalisées (PV−PA)',totalLiv,true,'var(--accent2)')}
+        ${row('Produits livraisons (PV × quantité livrée)',ventesLiv,true,'var(--accent2)')}
         ${row('Adhésions perçues',totalAdh,true,'var(--accent2)')}
       </div>
       <div class="bilan-section">
@@ -2002,8 +2013,7 @@ window.renderBilan = function(){
     <div class="card">
       <div class="card-title" style="color:var(--red);">🔴 PASSIF — ${year}</div>
       <div class="bilan-section">
-        <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;padding:6px 12px 2px;letter-spacing:0.7px;">Charges & Dettes</div>
-        ${row('Épargne clients à livrer (dette)',detteClients,true,'var(--warn)')}
+        <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;padding:6px 12px 2px;letter-spacing:0.7px;">Charges</div>
         ${row('Total charges décaissées',totalChrg,true,'var(--red)')}
       </div>
       <div class="bilan-section">
