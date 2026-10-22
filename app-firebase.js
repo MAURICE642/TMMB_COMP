@@ -14,7 +14,7 @@ const CUR_MONTH = TODAY.slice(0,7);
 // Données lues depuis TRIOMPHANT (lecture seule)
 let TDB = {
   agences:[], commerciaux:[], clients:[], paiements:[],
-  articles:[], stockMvts:[], livraisons:[], adhesionPays:[], mises:[], depenses:[], fichesPaie:[], chargesAuto:[], produitsPrive:[]
+  articles:[], stockMvts:[], livraisons:[], adhesionPays:[], mises:[], depenses:[], fichesPaie:[], chargesAuto:[], produitsPrive:[], produits:[]
 };
 
 // Données propres à la comptabilité (lecture/écriture)
@@ -86,6 +86,7 @@ function buildIndexes(){
   IDX.commerciauxById = new Map((TDB.commerciaux||[]).map(c=>[c._id,c]));
   IDX.articlesById    = new Map((TDB.articles||[]).map(a=>[a._id,a]));
   IDX.prixAchatProduit = new Map((TDB.produitsPrive||[]).map(p=>[p._id, Number(p.prixAchat||0)]));
+  IDX.produitsById     = new Map((TDB.produits||[]).map(p=>[p._id, p]));
   IDX.paiementsByMonth  = _groupBy(TDB.paiements,  p=>p.date?p.date.slice(0,7):null);
   IDX.paiementsByClient = _groupBy(TDB.paiements,  p=>p.clientId);
   IDX.livraisonsByMonth  = _groupBy(TDB.livraisons, l=>l.date?l.date.slice(0,7):null);
@@ -688,12 +689,12 @@ function _withTimeout(promise, ms, label){
       complet (ancien comportement, l'app reste fonctionnelle).
    ⚠ Ajouter une collection à CACHED_COLS impose d'incrémenter IDB_VER.
 ═══════════════════════════════════════════════════ */
-const CACHED_COLS      = ['clients','paiements','articles','livraisons','adhesionPays','depenses','stockMvts','fichesPaie','chargesAuto'];
+const CACHED_COLS      = ['clients','paiements','articles','livraisons','adhesionPays','depenses','stockMvts','fichesPaie','chargesAuto','produits'];
 const ALWAYS_FULL_COLS = ['agences','commerciaux','produitsPrive'];   // petites, ou sans _ts (commerciaux, produitsPrive)
 let PRIX_ACHAT_REFUSE = false;   // true si les règles Firestore refusent la lecture de produitsPrive
 const COUNT_ONLY_COLS  = ['mises'];                   // seulement affichée en nombre
 // stockMvts : téléchargé depuis la v11 (charges automatiques : entrées de stock)
-const IDB_NAME = 'triomphant_compta_cache', IDB_VER = 4;   // v2 : stockMvts · v3 : fichesPaie · v4 : chargesAuto
+const IDB_NAME = 'triomphant_compta_cache', IDB_VER = 5;   // v2 : stockMvts · v3 : fichesPaie · v4 : chargesAuto · v5 : produits (noms)
 const MARGIN_MS = 15*60*1000, DAY_MS = 864e5;
 const WIDEN_STEPS = [2*DAY_MS, 14*DAY_MS];
 
@@ -1232,6 +1233,12 @@ function margeLivraison(l){
   if(pa === null) return 0;                       // PA inconnu : rien compté comme marge
   return Number(l.montant||0) - pa*Number(l.qty||1);
 }
+/* Nom lisible d'un produit livré : fiche « produits » > nom figé dans la livraison > référence > identifiant. */
+function _nomProduit(l){
+  const p = IDX.produitsById?.get(l.produitId);
+  return (p?.nom || l.produitNom || IDX.articlesById.get(l.articleId)?.nom || p?.ref || l.produitRef || l.produitId || '?').toString().trim();
+}
+function _refProduit(l){ const p = IDX.produitsById?.get(l.produitId); return (p?.ref || l.produitRef || '').toString().trim(); }
 /* Prix d'achat suspects : ≤ 10 FCFA ou supérieur au prix de vente unitaire. */
 const PA_SUSPECT_MAX = 10;
 function _paSuspect(l, d){
@@ -1247,7 +1254,7 @@ function controlePrixAchat(year, month){
   livs.forEach(l=>{
     const d = _paDetail(l);
     const key = l.produitId || l.articleId || '?';
-    const p = res.produits.get(key) || { id:key, nom: l.produitNom || IDX.articlesById.get(l.articleId)?.nom || key, nb:0, ventes:0, pa:null, src:'', pv:Number(l.pvFige||0), motif:'' };
+    const p = res.produits.get(key) || { id:key, nom: _nomProduit(l), ref: _refProduit(l), nb:0, ventes:0, pa:null, src:'', pv:Number(l.pvFige||0), motif:'' };
     p.nb++; p.ventes += Number(l.montant||0);
     if(!d){ res.introuvable++; p.motif = 'Prix d\'achat introuvable'; }
     else { res[d.src]++; p.pa = d.pa; p.src = d.src; const m = _paSuspect(l, d); if(m) p.motif = m; }
@@ -1299,7 +1306,7 @@ function _alerteSansPA(year, month){
         <span class="tag ${c.introuvable?'tag-red':'tag-green'}">introuvable : ${c.introuvable}</span>
       </div>
       ${lignes.length ? `<table class="mini-table"><thead><tr><th>Produit</th><th>Livraisons</th><th>Ventes</th><th>PV unitaire</th><th>PA utilisé</th><th>Problème</th></tr></thead><tbody>
-        ${lignes.map(p=>`<tr><td>${esc(p.nom)}<br><span class="tm" style="font-size:10px;">${esc(p.id)}</span></td><td>${p.nb}</td><td>${fmt(p.ventes)}</td><td>${p.pv?fmt(p.pv):'—'}</td>
+        ${lignes.map(p=>`<tr><td><strong>${esc(p.nom)}</strong><br><span class="tm" style="font-size:10px;">${p.ref?'Réf. '+esc(p.ref)+' · ':''}id ${esc(p.id)}</span></td><td>${p.nb}</td><td>${fmt(p.ventes)}</td><td>${p.pv?fmt(p.pv):'—'}</td>
           <td>${p.pa===null?'—':fmt(p.pa)+` <span class="tm" style="font-size:10px;">(${SRC[p.src]})</span>`}</td>
           <td><span class="tag ${p.pa===null?'tag-red':'tag-warn'}">${esc(p.motif)}</span></td></tr>`).join('')}
       </tbody></table>
@@ -2206,7 +2213,7 @@ function _journalData(){
   src(IDX.livraisonsByMonth)
     .filter(l=>l.statut!=='en_attente')
     .forEach(l=>{
-      const nomP = l.produitNom || IDX.articlesById.get(l.articleId)?.nom || '?';
+      const nomP = _nomProduit(l);
       const cl  = IDX.clientsById.get(l.clientId)||{nom:'?'};
       const pa  = _paLivraison(l);
       const marge = margeLivraison(l);
