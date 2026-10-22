@@ -1239,6 +1239,35 @@ function _nomProduit(l){
   return (p?.nom || l.produitNom || IDX.articlesById.get(l.articleId)?.nom || p?.ref || l.produitRef || l.produitId || '?').toString().trim();
 }
 function _refProduit(l){ const p = IDX.produitsById?.get(l.produitId); return (p?.ref || l.produitRef || '').toString().trim(); }
+/* ✏️ Correction du prix d'achat d'un produit (administrateur) : écrit UNIQUEMENT
+   le champ prixAchat de produitsPrive/{produitId}, sans toucher aux autres champs. */
+window.corrigerPrixAchat = async function(id){
+  if(window._userRole !== 'admin'){ notify('Réservé à l\'administrateur', 'err'); return; }
+  if(!db_fs){ notify('Non connecté à Firebase', 'err'); return; }
+  const p = window._paCtrl?.get(id); if(!p) return;
+  const ancien = IDX.prixAchatProduit?.get(id);
+  const saisie = prompt(`Prix d'achat UNITAIRE de « ${p.nom} » (FCFA)\n`
+    + `Prix de vente unitaire : ${p.pv ? p.pv.toLocaleString('fr-FR') : 'inconnu'}\n`
+    + `Prix d'achat actuel : ${ancien ? ancien.toLocaleString('fr-FR') : 'aucun'}`, ancien > 10 ? String(ancien) : '');
+  if(saisie === null) return;
+  const pa = Number(String(saisie).replace(/[\s\u202f]/g,'').replace(',','.'));
+  if(!(pa > 0) || !isFinite(pa)){ notify('Prix d\'achat invalide : saisissez un nombre supérieur à 0', 'err'); return; }
+  const n = Math.round(pa);
+  const alerte = n <= PA_SUSPECT_MAX ? `\n\n⚠️ ${n} FCFA semble trop faible.` : (p.pv && n > p.pv) ? `\n\n⚠️ Supérieur au prix de vente (${p.pv.toLocaleString('fr-FR')}) : la marge sera négative.` : '';
+  if(!confirm(`Enregistrer le prix d'achat de « ${p.nom} » ?\n\nAncien : ${ancien ? ancien.toLocaleString('fr-FR') : 'aucun'} FCFA\nNouveau : ${n.toLocaleString('fr-FR')} FCFA`
+    + `\n\nLa modification est enregistrée dans l'app TMMB (produitsPrive) et s'applique aux marges de toutes les livraisons de ce produit.${alerte}`)) return;
+  try{
+    await setDoc(doc(db_fs, 'produitsPrive', id), { prixAchat: n }, { merge: true });
+    const loc = (TDB.produitsPrive ||= []).find(x=>x._id===id);
+    if(loc) loc.prixAchat = n; else TDB.produitsPrive.push({ _id:id, prixAchat:n });
+    console.info(`[prixAchat] ${id} : ${ancien ?? 'aucun'} -> ${n} (par ${getCurrentUser()?.email||'?'})`);
+    buildIndexes();
+    renderPg(curPg);
+    notify(`✅ Prix d'achat de « ${p.nom} » : ${n.toLocaleString('fr-FR')} FCFA`);
+  }catch(e){
+    notify(e?.code === 'permission-denied' ? '⛔ Modification refusée par les règles Firestore (administrateur requis)' : 'Erreur : ' + (e?.message || e), 'err');
+  }
+};
 /* Prix d'achat suspects : ≤ 10 FCFA ou supérieur au prix de vente unitaire. */
 const PA_SUSPECT_MAX = 10;
 function _paSuspect(l, d){
@@ -1254,7 +1283,7 @@ function controlePrixAchat(year, month){
   livs.forEach(l=>{
     const d = _paDetail(l);
     const key = l.produitId || l.articleId || '?';
-    const p = res.produits.get(key) || { id:key, nom: _nomProduit(l), ref: _refProduit(l), nb:0, ventes:0, pa:null, src:'', pv:Number(l.pvFige||0), motif:'' };
+    const p = res.produits.get(key) || { id:key, estProduit: !!l.produitId, nom: _nomProduit(l), ref: _refProduit(l), nb:0, ventes:0, pa:null, src:'', pv:Number(l.pvFige||0), motif:'' };
     p.nb++; p.ventes += Number(l.montant||0);
     if(!d){ res.introuvable++; p.motif = 'Prix d\'achat introuvable'; }
     else { res[d.src]++; p.pa = d.pa; p.src = d.src; const m = _paSuspect(l, d); if(m) p.motif = m; }
@@ -1295,6 +1324,8 @@ function _alerteSansPA(year, month){
   if(s.nb) html += `<div class="alert alert-warn" style="margin:8px 0;font-size:12px;">⚠️ <strong>${s.nb} livraison(s)</strong> (ventes ${fmt(s.ventes)}) : prix d'achat introuvable, <strong>marge non comptée</strong>. Voir « Contrôle des prix d'achat » ci-dessous.</div>`;
   if(!c.total) return html;
   const lignes = [...sans, ...suspects].sort((a,b)=>b.ventes-a.ventes);
+  window._paCtrl = new Map(lignes.map(p=>[p.id, p]));       // pour le bouton ✏️
+  const peutCorriger = window._userRole === 'admin' && !PRIX_ACHAT_REFUSE;
   const SRC = { prixAchat:'produitsPrive', composition:'composition', article:'article' };
   html += `<details class="coll no-print" id="coll-controle-pa" ${lignes.length?'open':''}>
     <summary class="coll-sum"><span class="coll-title">🔎 Contrôle des prix d'achat ${lignes.length?`<span class="coll-count" style="color:var(--warn);">(${lignes.length} produit(s) à vérifier)</span>`:'<span class="coll-count">(tout est relié)</span>'}</span><span class="coll-hint">${c.total} livraison(s) sur la période</span></summary>
@@ -1305,12 +1336,13 @@ function _alerteSansPA(year, month){
         ${c.article?`<span class="tag tag-purple">ancien format : ${c.article}</span>`:''}
         <span class="tag ${c.introuvable?'tag-red':'tag-green'}">introuvable : ${c.introuvable}</span>
       </div>
-      ${lignes.length ? `<table class="mini-table"><thead><tr><th>Produit</th><th>Livraisons</th><th>Ventes</th><th>PV unitaire</th><th>PA utilisé</th><th>Problème</th></tr></thead><tbody>
+      ${lignes.length ? `<table class="mini-table"><thead><tr><th>Produit</th><th>Livraisons</th><th>Ventes</th><th>PV unitaire</th><th>PA utilisé</th><th>Problème</th>${peutCorriger?'<th></th>':''}</tr></thead><tbody>
         ${lignes.map(p=>`<tr><td><strong>${esc(p.nom)}</strong><br><span class="tm" style="font-size:10px;">${p.ref?'Réf. '+esc(p.ref)+' · ':''}id ${esc(p.id)}</span></td><td>${p.nb}</td><td>${fmt(p.ventes)}</td><td>${p.pv?fmt(p.pv):'—'}</td>
           <td>${p.pa===null?'—':fmt(p.pa)+` <span class="tm" style="font-size:10px;">(${SRC[p.src]})</span>`}</td>
-          <td><span class="tag ${p.pa===null?'tag-red':'tag-warn'}">${esc(p.motif)}</span></td></tr>`).join('')}
+          <td><span class="tag ${p.pa===null?'tag-red':'tag-warn'}">${esc(p.motif)}</span></td>
+          ${peutCorriger ? `<td>${p.estProduit ? `<button class="btn btn-ghost btn-xs" onclick="corrigerPrixAchat('${esc(p.id)}')" title="Corriger le prix d'achat de ce produit">✏️ Corriger</button>` : '<span class="tm" style="font-size:10px;">ancien format</span>'}</td>` : ''}</tr>`).join('')}
       </tbody></table>
-      <div class="tm" style="font-size:11px;margin-top:8px;">À corriger dans l'app TMMB (fiche produit : prix d'achat), puis cliquez sur 🔄 Synchroniser. Les PA suspects sont utilisés tels quels.</div>` : '<div class="tm" style="font-size:12px;">✅ Toutes les livraisons de la période ont un prix d\'achat plausible.</div>'}
+      <div class="tm" style="font-size:11px;margin-top:8px;">${peutCorriger ? 'Cliquez sur ✏️ Corriger pour saisir le bon prix d\'achat unitaire (enregistré dans l\'app TMMB, collection produitsPrive).' : 'Correction réservée à l\'administrateur (bouton ✏️), ou dans l\'app TMMB.'} Les PA suspects sont utilisés tels quels.</div>` : '<div class="tm" style="font-size:12px;">✅ Toutes les livraisons de la période ont un prix d\'achat plausible.</div>'}
     </div>
   </details>`;
   return html;
