@@ -227,6 +227,8 @@ function buildAutoCharges(){
 /* Retourne les entrées d'une map-par-mois pour une période donnée :
    un mois précis ('YYYY-MM'), ou toute une année si month est vide. */
 function _monthlyRange(map, year, month){
+  // [TOUTES PÉRIODES] year === 'tout' : toutes les années, tous les mois (le mois est ignoré)
+  if(year === PERIODE_TOUT){ let all = []; map.forEach(arr=>{ all = all.concat(arr); }); return all; }
   if(month) return map.get(`${year}-${month}`) || [];
   let out = [];
   for(let m=1;m<=12;m++){
@@ -245,18 +247,37 @@ function getYears(){
   return [...yrs].sort().reverse();
 }
 
+/* ═══ « Toutes les périodes » ═══ */
+const PERIODE_TOUT = 'tout';
+/* Préfixe de date pour filtrer ('' = tout). */
+function _periodPrefix(year, month){ return year === PERIODE_TOUT ? '' : (month ? `${year}-${month}` : (year||'')); }
+/* Désactive le sélecteur de mois quand « Toutes les périodes » est choisi. */
+function _syncMonthSelect(id, year){
+  const el = document.getElementById(id); if(!el) return;
+  const tout = year === PERIODE_TOUT;
+  el.disabled = tout; el.title = tout ? 'Sans objet : toutes les périodes sont affichées' : '';
+}
+/* Points des graphiques : 12 mois d'une année, ou 1 point par année pour « Toutes les périodes ». */
+function _chartPoints(year){
+  const moisNoms=['Jan','Fév','Mar','Avr','Mai','Jun','Jul','Aoû','Sep','Oct','Nov','Déc'];
+  if(year === PERIODE_TOUT) return getYears().slice().sort().map(y=>({ label:y, y, m:'' }));
+  return moisNoms.map((n,i)=>({ label:n, y:year, m:String(i+1).padStart(2,'0') }));
+}
+
 function populateYearSelects(){
   const yrs = getYears();
   ['dash-year','bilan-year','res-year','proj-year','cf-year'].forEach(id=>{
     const el = document.getElementById(id);
     if(!el) return;
     const prev = el.value;
-    el.innerHTML = yrs.map(y=>`<option value="${y}"${y===CUR_YEAR?'selected':''}>${y}</option>`).join('');
-    if(prev && yrs.includes(prev)) el.value = prev;
+    el.innerHTML = `<option value="${PERIODE_TOUT}">Toutes les périodes</option>`
+      + yrs.map(y=>`<option value="${y}"${y===CUR_YEAR?'selected':''}>${y}</option>`).join('');
+    el.value = (prev && (prev === PERIODE_TOUT || yrs.includes(prev))) ? prev : CUR_YEAR;
   });
 }
 
 function periodLabel(year, month){
+  if(year === PERIODE_TOUT) return 'Toutes les périodes';
   if(!month) return `Exercice ${year}`;
   const mois=['Jan','Fév','Mar','Avr','Mai','Jun','Jul','Aoû','Sep','Oct','Nov','Déc'];
   return `${mois[parseInt(month)-1]} ${year}`;
@@ -1246,6 +1267,12 @@ function totalVentesLivraisons(year, month){
     .filter(l=>l.statut!=='en_attente')
     .reduce((a,l)=>a+Number(l.montant||0),0);
 }
+/* Coût d'achat des produits livrés : Σ PA unitaire × quantité (livraisons dont le PA est connu). */
+function totalCoutLivraisons(year, month){
+  return _monthlyRange(IDX.livraisonsByMonth, year, month)
+    .filter(l=>l.statut!=='en_attente')
+    .reduce((a,l)=>{ const pa = _paLivraison(l); return pa === null ? a : a + pa*Number(l.qty||1); }, 0);
+}
 /* Livraisons dont la marge n'a pas pu être calculée (prix d'achat introuvable). */
 function livraisonsSansPA(year, month){
   const arr = _monthlyRange(IDX.livraisonsByMonth, year, month).filter(l=>l.statut!=='en_attente' && _paLivraison(l)===null);
@@ -1283,7 +1310,7 @@ function _alerteSansPA(year, month){
 }
 function getClientsPayesNonLivres(year, month){
   // Clients ayant payé (sur la période) mais sans livraison avec statut 'livre'
-  const prefix = month ? `${year}-${month}` : (year||'');
+  const prefix = _periodPrefix(year, month);
   const clientsAvecPaiement = [...new Set(
     TDB.paiements
       .filter(p=>p.date&&(prefix?p.date.startsWith(prefix):true))
@@ -1299,7 +1326,7 @@ function getClientsPayesNonLivres(year, month){
 
 function projectionClientsRestants(year, month){
   // Marge projetée = total paiements des clients non livrés - coût produit estimé
-  const prefix = month ? `${year}-${month}` : (year||'');
+  const prefix = _periodPrefix(year, month);
   const clientsIds = getClientsPayesNonLivres(year, month);
 
   // Ratio moyen PA/PV sur tous les articles
@@ -1346,7 +1373,8 @@ function totalAchatsStock(year, month){
 ═══════════════════════════════════════════════════ */
 window.renderDashboard = function(){
   const year  = document.getElementById('dash-year')?.value||CUR_YEAR;
-  const month = document.getElementById('dash-month')?.value||'';
+  _syncMonthSelect('dash-month', year);
+  const month = year===PERIODE_TOUT ? '' : (document.getElementById('dash-month')?.value||'');
 
   const collectes   = totalPaiements(year,month);          // épargne clients (dette)
   const margeLiv    = totalLivraisons(year,month);          // revenu réel livraisons
@@ -1362,40 +1390,30 @@ window.renderDashboard = function(){
 
   document.getElementById('dash-kpi').innerHTML=`
     <div class="kpi-card kc-green">
-      <div class="kpi-lbl">Produits réels (livrés)</div>
+      <div class="kpi-lbl">RÉSULTAT DE LIVRAISON</div>
       <div class="kpi-val kv-green">${fmt(produits)}</div>
       <div class="kpi-sub">Marge livraisons + Adhésions</div>
     </div>
     <div class="kpi-card kc-red">
       <div class="kpi-lbl">Total Charges</div>
       <div class="kpi-val kv-red">${fmt(charges)}</div>
-      <div class="kpi-sub">${CHARGES.filter(c=>c.date&&c.date.startsWith(month?`${year}-${month}`:year)).length} écritures</div>
+      <div class="kpi-sub">${chargesPeriode(year, month).length} écritures</div>
     </div>
     <div class="kpi-card ${resultat>=0?'kc-blue':'kc-red'}">
       <div class="kpi-lbl">Bénéfice Net</div>
       <div class="kpi-val ${resultat>=0?'kv-blue':'kv-red'}">${fmt(Math.abs(resultat))}</div>
       <div class="kpi-sub">${resultat>=0?'✅ Bénéfice':'❌ Déficit'} · taux ${tx}%</div>
     </div>
-    <div class="kpi-card kc-yellow" style="cursor:pointer;" onclick="go('projection')" title="Voir la projection détaillée">
-      <div class="kpi-lbl">🔮 Projection si tous livrés</div>
-      <div class="kpi-val kv-yellow">${fmt(Math.abs(resultatAvecEnCours))}</div>
-      <div class="kpi-sub" style="display:flex;flex-direction:column;gap:2px;margin-top:6px;">
-        <span>${resultatAvecEnCours>=0?'✅ Bénéfice projeté':'❌ Déficit projeté'}</span>
-        <span style="color:var(--warn);">👥 ${proj.nbClients} client(s) non livrés · +${fmt(proj.marge)} marge potentielle</span>
-        <span style="color:var(--accent);font-size:10px;margin-top:2px;">→ Voir le détail complet</span>
-      </div>
-    </div>`;
+`;
 
   // Chart évolution mensuelle
   const moisNoms=['Jan','Fév','Mar','Avr','Mai','Jun','Jul','Aoû','Sep','Oct','Nov','Déc'];
   const evoLabels=[], evoProd=[], evoChrg=[];
-  for(let i=0;i<12;i++){
-    const d = new Date(parseInt(year),i,1);
-    const mm = String(i+1).padStart(2,'0');
-    evoLabels.push(moisNoms[i]);
-    evoProd.push(totalLivraisons(year,mm)+totalAdhesions(year,mm));   // [CORRECTIF] sans les cotisations
-    evoChrg.push(totalCharges(year,mm));
-  }
+  _chartPoints(year).forEach(pt=>{
+    evoLabels.push(pt.label);
+    evoProd.push(totalLivraisons(pt.y,pt.m)+totalAdhesions(pt.y,pt.m));   // sans les cotisations
+    evoChrg.push(totalCharges(pt.y,pt.m));
+  });
   if(chartEvo){chartEvo.destroy();chartEvo=null;}
   const c1=document.getElementById('chart-evo');
   if(c1) chartEvo=new Chart(c1,{
@@ -1458,7 +1476,8 @@ window.renderDashboard = function(){
    CHARGES
 ═══════════════════════════════════════════════════ */
 window.renderCharges = function(){
-  const month  = document.getElementById('ch-month')?.value||'';
+  const chTout = !!document.getElementById('ch-tout')?.checked;          // [TOUTES PÉRIODES]
+  const month  = chTout ? '' : (document.getElementById('ch-month')?.value||'');
   const cat    = document.getElementById('ch-cat')?.value||'';
   const search = (document.getElementById('ch-search')?.value||'').toLowerCase();
 
@@ -1466,7 +1485,7 @@ window.renderCharges = function(){
   const errEl = document.getElementById('ch-range-err');
   if(errEl){ errEl.textContent = rg.erreur; errEl.style.display = rg.erreur ? 'block' : 'none'; }
   const monthEl = document.getElementById('ch-month');
-  if(monthEl){ monthEl.disabled = rg.actif; monthEl.title = rg.actif ? 'Ignoré : la plage « du / au » est utilisée' : ''; }
+  if(monthEl){ monthEl.disabled = rg.actif || chTout; monthEl.title = rg.actif ? 'Ignoré : la plage « du / au » est utilisée' : chTout ? 'Ignoré : toutes les périodes' : ''; }
 
   // [LISTE UNIQUE] Charges saisies + dépenses TMMB enregistrées + salaires des fiches payées :
   // affichées et totalisées ensemble, comme les charges du compte de résultat.
@@ -1975,8 +1994,11 @@ window.renderBilan = function(){
   const detteClients   = totalCollectes;                     // épargne à reverser en produits
   const resultatNet    = totalProduits - totalChrg;
   const resultatNetProj = resultatNet + livEnCours;
-  // [BILAN] Épargne des clients retirée du passif (demande du 22/10/2026).
-  const totalPassif    = totalChrg + Math.max(resultatNet,0);
+  // [BILAN] Épargne des clients retirée du passif (22/10/2026).
+  // Coût d'achat des produits livrés ajouté au passif : contrepartie des « Produits livraisons » de l'actif.
+  const coutAchatsLiv  = totalCoutLivraisons(year,'');
+  const sansPABilan    = livraisonsSansPA(year,'');
+  const totalPassif    = totalChrg + coutAchatsLiv + Math.max(resultatNet,0);
 
   const row=(label,val,indent=false,accent='var(--text)')=>`
     <div class="bilan-row ${indent?'bilan-indent':''}">
@@ -1986,7 +2008,7 @@ window.renderBilan = function(){
 
   document.getElementById('bilan-container').innerHTML=`
     <div class="card">
-      <div class="card-title" style="color:var(--accent2);">🟢 ACTIF — ${year}</div>
+      <div class="card-title" style="color:var(--accent2);">🟢 ACTIF — ${year===PERIODE_TOUT?'Toutes les périodes':year}</div>
       <div class="bilan-section">
         <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;padding:6px 12px 2px;letter-spacing:0.7px;">Actif circulant (livrés)</div>
         ${row('Produits livraisons (PV × quantité livrée)',ventesLiv,true,'var(--accent2)')}
@@ -2011,10 +2033,12 @@ window.renderBilan = function(){
       </div>`:''}
     </div>
     <div class="card">
-      <div class="card-title" style="color:var(--red);">🔴 PASSIF — ${year}</div>
+      <div class="card-title" style="color:var(--red);">🔴 PASSIF — ${year===PERIODE_TOUT?'Toutes les périodes':year}</div>
       <div class="bilan-section">
         <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;padding:6px 12px 2px;letter-spacing:0.7px;">Charges</div>
         ${row('Total charges décaissées',totalChrg,true,'var(--red)')}
+        ${row('Coût d\'achat des produits livrés (PA × quantité)',coutAchatsLiv,true,'var(--red)')}
+        ${sansPABilan.nb ? `<div style="font-size:10.5px;color:var(--warn);padding:2px 12px 0 22px;">⚠️ ${sansPABilan.nb} livraison(s) sans prix d'achat connu (ventes ${fmt(sansPABilan.ventes)}) : leur coût n'est pas inclus</div>` : ''}
       </div>
       <div class="bilan-section">
         <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;padding:6px 12px 2px;letter-spacing:0.7px;">Capitaux propres</div>
@@ -2039,7 +2063,7 @@ window.renderBilan = function(){
   // ── En-tête impression ──
   const _php_b = document.getElementById('ph-bilan-period');
   const _phd_b = document.getElementById('ph-bilan-date');
-  if(_php_b) _php_b.textContent = `Exercice ${year}`;
+  if(_php_b) _php_b.textContent = periodLabel(year,'');
   if(_phd_b) _phd_b.textContent = `Édité le ${new Date().toLocaleDateString('fr-FR')}`;
 };
 
@@ -2048,7 +2072,8 @@ window.renderBilan = function(){
 ═══════════════════════════════════════════════════ */
 window.renderResultat = function(){
   const year  = document.getElementById('res-year')?.value||CUR_YEAR;
-  const month = document.getElementById('res-month')?.value||'';
+  _syncMonthSelect('res-month', year);
+  const month = year===PERIODE_TOUT ? '' : (document.getElementById('res-month')?.value||'');
 
   const recPay  = totalPaiements(year,month);
   const recLiv  = totalLivraisons(year,month);
@@ -2074,8 +2099,7 @@ window.renderResultat = function(){
     </div>`;
 
   document.getElementById('res-container').innerHTML=`
-    <div class="kpi-row kpi-4">
-      <div class="kpi-card kc-blue"><div class="kpi-lbl">Total collecté</div><div class="kpi-val kv-blue">${fmt(recPay)}</div><div class="kpi-sub">Cotisations : dette envers les clients, pas une entrée</div></div>
+    <div class="kpi-row kpi-3">
       <div class="kpi-card kc-green"><div class="kpi-lbl">Total des entrées</div><div class="kpi-val kv-green">${fmt(totalProd)}</div><div class="kpi-sub">Marge des livraisons + adhésions</div></div>
       <div class="kpi-card kc-red"><div class="kpi-lbl">Total des sorties</div><div class="kpi-val kv-red">${fmt(totalChrg)}</div><div class="kpi-sub">Charges saisies, dépenses enregistrées, salaires payés</div></div>
       <div class="kpi-card ${resultat>=0?'kc-green':'kc-red'}"><div class="kpi-lbl">${resultat>=0?'Bénéfice net':'Déficit net'}</div><div class="kpi-val" style="color:${resultat>=0?'var(--accent2)':'var(--red)'};">${fmt(resultat)}</div><div class="kpi-sub">Entrées − sorties</div></div>
@@ -2089,11 +2113,6 @@ window.renderResultat = function(){
           ${row('Adhésions clients',recAdh,true,'var(--accent2)')}
           <div class="bilan-row total-row">
             <span>TOTAL DES ENTRÉES</span><span class="amt-pos">${fmt(totalProd)}</span>
-          </div>
-          <div style="margin-top:8px;padding:8px 14px;background:rgba(108,143,255,0.06);border:1px solid rgba(108,143,255,0.18);border-radius:8px;">
-            <div style="font-size:10px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:0.7px;margin-bottom:4px;">💰 Total collecté (information)</div>
-            ${row('Cotisations clients reçues',recPay,true,'var(--muted)')}
-            <div style="font-size:10px;color:var(--muted);margin-top:2px;">→ Dette envers les clients : n'est PAS une entrée, non comptée dans le bénéfice</div>
           </div>
           ${recLivEnCours>0?`
           <div style="margin-top:10px;padding:10px 14px;background:rgba(249,200,70,0.07);border:1px solid rgba(249,200,70,0.2);border-radius:8px;">
@@ -2133,15 +2152,14 @@ window.renderResultat = function(){
   // Graphique évolution résultat mensuel
   const moisNoms=['Jan','Fév','Mar','Avr','Mai','Jun','Jul','Aoû','Sep','Oct','Nov','Déc'];
   const labels=[], dataRes=[], colors=[];
-  for(let i=0;i<12;i++){
-    const mm=String(i+1).padStart(2,'0');
-    const p=totalLivraisons(year,mm)+totalAdhesions(year,mm);   // [CORRECTIF] sans les cotisations
-    const c=totalCharges(year,mm);
+  _chartPoints(year).forEach(pt=>{
+    const p=totalLivraisons(pt.y,pt.m)+totalAdhesions(pt.y,pt.m);   // sans les cotisations
+    const c=totalCharges(pt.y,pt.m);
     const r=p-c;
-    labels.push(moisNoms[i]);
+    labels.push(pt.label);
     dataRes.push(r);
     colors.push(r>=0?'rgba(46,232,181,0.75)':'rgba(239,68,68,0.75)');
-  }
+  });
   if(chartResMensuel){chartResMensuel.destroy();chartResMensuel=null;}
   const c=document.getElementById('chart-resultat-mensuel');
   if(c) chartResMensuel=new Chart(c,{
@@ -2164,11 +2182,12 @@ let _jrnSolde = 0;
    Utilisé par l'affichage ET l'export CSV (l'export ne dépend plus des lignes
    affichées à l'écran, qui peuvent être limitées). */
 function _journalData(){
-  const month  = document.getElementById('jrn-month')?.value||CUR_MONTH;
+  const tout   = !!document.getElementById('jrn-tout')?.checked;            // [TOUTES PÉRIODES]
+  const month  = tout ? PERIODE_TOUT : (document.getElementById('jrn-month')?.value||CUR_MONTH);
   const typeF  = document.getElementById('jrn-type')?.value||'';
   const rg     = _dateRange('jrn');
   // Plage du/au renseignée : elle remplace le mois (peut couvrir plusieurs mois)
-  const src = map => rg.actif ? _rangeFromMonthly(map, rg) : _monthlyRange(map, ...month.split('-'));
+  const src = map => rg.actif ? _rangeFromMonthly(map, rg) : tout ? _monthlyRange(map, PERIODE_TOUT, '') : _monthlyRange(map, ...month.split('-'));
 
   // Construire les écritures
   const ecritures = [];
@@ -2230,7 +2249,7 @@ window.renderJournal = function(){
   const errEl = document.getElementById('jrn-range-err');
   if(errEl){ errEl.textContent = rg.erreur; errEl.style.display = rg.erreur ? 'block' : 'none'; }
   const monthEl = document.getElementById('jrn-month');
-  if(monthEl){ monthEl.disabled = rg.actif; monthEl.title = rg.actif ? 'Ignoré : la plage « du / au » est utilisée' : ''; }
+  if(monthEl){ monthEl.disabled = rg.actif || month===PERIODE_TOUT; monthEl.title = rg.actif ? 'Ignoré : la plage « du / au » est utilisée' : month===PERIODE_TOUT ? 'Ignoré : toutes les périodes' : ''; }
   let solde = 0;
   let totalDebit = 0, totalCredit = 0;
   const TYPE_LABELS={recette:'Recette',livraison:'Livraison',adhesion:'Adhésion',charge:'Charge'};
@@ -2249,7 +2268,7 @@ window.renderJournal = function(){
   const moisNoms=['Jan','Fév','Mar','Avr','Mai','Jun','Jul','Aoû','Sep','Oct','Nov','Déc'];
   const [y,m] = month.split('-');
   const fr = d => d ? d.split('-').reverse().join('/') : '…';
-  const periodLabel = rg.actif ? `du ${fr(rg.du)} au ${fr(rg.au)}` : (m ? `${moisNoms[parseInt(m)-1]} ${y}` : `Exercice ${y}`);
+  const periodLabel = rg.actif ? `du ${fr(rg.du)} au ${fr(rg.au)}` : month===PERIODE_TOUT ? 'Toutes les périodes' : (m ? `${moisNoms[parseInt(m)-1]} ${y}` : `Exercice ${y}`);
   const php = document.getElementById('ph-journaux-period');
   const phd = document.getElementById('ph-journaux-date');
   if(php) php.textContent = `Période : ${periodLabel}`;
@@ -2551,10 +2570,11 @@ let chartProjCompare = null;
 
 window.renderProjection = function(){
   const year  = document.getElementById('proj-year')?.value||CUR_YEAR;
-  const month = document.getElementById('proj-month')?.value||'';
+  _syncMonthSelect('proj-month', year);
+  const month = year===PERIODE_TOUT ? '' : (document.getElementById('proj-month')?.value||'');
   const search = (document.getElementById('proj-search')?.value||'').toLowerCase();
 
-  const prefix = month ? `${year}-${month}` : year;
+  const prefix = _periodPrefix(year, month);
 
   // Calculs de base
   const margeLivReelle = totalLivraisons(year,month);
@@ -2680,7 +2700,7 @@ window.renderProjection = function(){
 window.exportProjection = function(){
   const year  = document.getElementById('proj-year')?.value||CUR_YEAR;
   const month = document.getElementById('proj-month')?.value||'';
-  const prefix = month ? `${year}-${month}` : year;
+  const prefix = _periodPrefix(year, month);
   const proj = projectionClientsRestants(year, month);
   const clientsIds = getClientsPayesNonLivres(year, month);
 
@@ -3774,7 +3794,8 @@ function renderRatios(produits, charges, periodeLabel){
 // ═══════════════════════════════════════════════════
 window.renderTresorerie = function(){
   const year  = document.getElementById('cf-year')?.value  || CUR_YEAR;
-  const month = document.getElementById('cf-month')?.value || '';
+  _syncMonthSelect('cf-month', year);
+  const month = year===PERIODE_TOUT ? '' : (document.getElementById('cf-month')?.value || '');
   const filter = month ? year+'-'+month : year;
 
   // ENTRÉES
@@ -3823,12 +3844,11 @@ window.renderTresorerie = function(){
   // Graphe mensuel
   const moisNoms=['Jan','Fév','Mar','Avr','Mai','Jun','Jul','Aoû','Sep','Oct','Nov','Déc'];
   const labels=[], dataIn=[], dataOut=[], dataNet=[];
-  for(let i=0;i<12;i++){
-    const m=String(i+1).padStart(2,'0');
-    const ein = totalPaiements(year,m) + totalAdhesions(year,m);   // [CORRECTIF] sans les livraisons
-    const eout= totalCharges(year,m) + totalAchatsStock(year,m);
-    labels.push(moisNoms[i]); dataIn.push(ein); dataOut.push(eout); dataNet.push(ein-eout);
-  }
+  _chartPoints(year).forEach(pt=>{
+    const ein = totalPaiements(pt.y,pt.m) + totalAdhesions(pt.y,pt.m);   // sans les livraisons
+    const eout= totalCharges(pt.y,pt.m) + totalAchatsStock(pt.y,pt.m);
+    labels.push(pt.label); dataIn.push(ein); dataOut.push(eout); dataNet.push(ein-eout);
+  });
   const ctx=document.getElementById('chart-cashflow');
   if(ctx){
     if(ctx._chartInst) ctx._chartInst.destroy();
@@ -4018,7 +4038,7 @@ window.printPage = function(page){
 
 window.exportBilanCSV = function(){
   const year = document.getElementById('bilan-year')?.value||CUR_YEAR;
-  const rows = [['BILAN COMPTABLE — '+year],[''],['ACTIF','Montant'],['PASSIF','Montant']];
+  const rows = [['BILAN COMPTABLE — '+periodLabel(year,'')],[''],['ACTIF','Montant'],['PASSIF','Montant']];
   document.querySelectorAll('#bilan-container .tw table tr').forEach(tr=>{
     const tds=[...tr.querySelectorAll('td,th')];
     if(tds.length>=2) rows.push(tds.map(td=>'"'+td.textContent.trim().replace(/"/g,'""')+'"'));

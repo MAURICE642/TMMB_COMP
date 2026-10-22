@@ -169,7 +169,7 @@
             <option value="11">Novembre</option><option value="12">Décembre</option>
           </select>
         </div>
-        <div class="kpi-row kpi-4" id="dash-kpi"></div>
+        <div class="kpi-row kpi-3" id="dash-kpi"></div>
         <div class="g2">
           <div class="card">
             <div class="card-title">📈 Évolution Produits vs Charges</div>
@@ -200,6 +200,7 @@
         </div>
         <div class="filters">
           <input type="month" id="ch-month" class="form-control" style="font-size:12px;" onchange="renderCharges()">
+          <label class="chk-tout"><input type="checkbox" id="ch-tout" onchange="renderCharges()"> Toutes les périodes</label>
           <select id="ch-cat" class="form-control" style="font-size:12px;" onchange="renderCharges()">
             <option value="">Toutes catégories</option>
             <option value="Personnel">Personnel / Salaires</option>
@@ -364,6 +365,7 @@
         </div>
         <div class="filters">
           <input type="month" id="jrn-month" class="form-control" style="font-size:12px;" onchange="renderJournal()">
+          <label class="chk-tout"><input type="checkbox" id="jrn-tout" onchange="renderJournal()"> Toutes les périodes</label>
           <select id="jrn-type" class="form-control" style="font-size:12px;" onchange="renderJournal()">
             <option value="">Tous types</option>
             <option value="recette">Recettes</option>

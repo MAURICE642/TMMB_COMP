@@ -525,6 +525,8 @@ details.coll[open] > .coll-sum::before{transform:rotate(90deg);}
 .coll-count{color:var(--muted);font-weight:600;font-family:'DM Sans',sans-serif;}
 .coll-hint{font-size:10px;color:var(--muted);font-weight:500;font-family:'DM Sans',sans-serif;}
 .date-range{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;}
+.chk-tout{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text);cursor:pointer;white-space:nowrap;padding:6px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;}
+.chk-tout input, .filters .chk-tout input{width:auto!important;accent-color:var(--accent);}
 .date-range label{font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;}
 .date-range input[type=date]{width:auto!important;}
 .filters select:disabled,.filters input:disabled{opacity:.45;cursor:not-allowed;}
