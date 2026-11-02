@@ -2401,6 +2401,69 @@ function getCollecteCommercial(nomOuId, year, month){
     .reduce((a,p) => a + Number(p.montant||0), 0);
 }
 
+/* 🔍 Détail de la collecte d'un commercial (LECTURE SEULE, 0 lecture Firestore :
+   utilise les données déjà chargées). Sert à comparer avec l'app TMMB. */
+function _cleDoublon(p){ return p._offlineId ? 'o:'+p._offlineId : null; }
+function _cleSimilaire(p){ return [p.clientId, p.date, p.heure||'', Number(p.montant||0)].join('|'); }
+window.detailCollecte = function(id){
+  const key = getSalKey(); const [year, month] = key.split('-');
+  const comm = TDB.commerciaux.find(c=>c._id===id);
+  const ligne = (SAL_DATA[key]||[]).find(l=>l.id===id);
+  const prefix = `${year}-${month}`;
+  const pays = TDB.paiements.filter(p => p.commercialId === id && p.date && p.date.startsWith(prefix))
+    .sort((a,b)=>(a.date+(a.heure||'')).localeCompare(b.date+(b.heure||'')));
+  const total = pays.reduce((a,p)=>a+Number(p.montant||0),0);
+  const parChamp = f => { const m = new Map(); pays.forEach(p=>{ const k = (p[f]===undefined||p[f]===null||p[f]==='') ? '(vide)' : String(p[f]);
+    const o = m.get(k) || {nb:0,total:0}; o.nb++; o.total += Number(p.montant||0); m.set(k,o); }); return [...m.entries()].sort((a,b)=>b[1].total-a[1].total); };
+  const groupes = (fn) => { const m = new Map(); pays.forEach(p=>{ const k=fn(p); if(k) (m.get(k)||m.set(k,[]).get(k)).push(p); }); return [...m.values()].filter(g=>g.length>1); };
+  const dOff = groupes(_cleDoublon), dSim = groupes(_cleSimilaire);
+  const surplus = gs => gs.reduce((a,g)=>a+g.slice(1).reduce((b,p)=>b+Number(p.montant||0),0),0);
+  const autresSaisie = pays.filter(p=>p.saisiParId && p.saisiParId!==id);
+  const negatifs = pays.filter(p=>Number(p.montant||0)<=0);
+  const adh = (TDB.adhesionPays||[]).filter(a=>a.commercialId===id && a.date && a.date.startsWith(prefix));
+  const totAdh = adh.reduce((a,x)=>a+Number(x.montant||0),0);
+  const tbl = (titre, rows) => `<div style="margin-top:12px;font-weight:700;font-size:12px;">${titre}</div>
+    <table class="mini-table"><thead><tr><th>Valeur</th><th>Nb</th><th>Montant</th></tr></thead><tbody>${rows.map(([k,o])=>`<tr><td>${esc(k)}</td><td>${o.nb}</td><td>${fmt(o.total)}</td></tr>`).join('')}</tbody></table>`;
+  const ln = (lbl,val,warn) => `<tr><td>${lbl}</td><td style="text-align:right;font-weight:700;${warn?'color:var(--red,#ef4444);':''}">${val}</td></tr>`;
+  window._detailCollecteRows = pays;
+  window._detailCollecteNom = (comm?.nom||comm?.name||id)+'_'+prefix;
+  let mo = document.getElementById('modal-detail-collecte');
+  if(!mo){ mo = document.createElement('div'); mo.className='mo hidden'; mo.id='modal-detail-collecte'; document.body.appendChild(mo); }
+  mo.innerHTML = `<div class="md" style="max-width:720px;"><div class="mh"><div class="md-title">🔍 Détail de la collecte — ${esc(comm?.nom||comm?.name||id)} — ${esc(prefix)}</div>
+    <button class="close-btn" onclick="document.getElementById('modal-detail-collecte').classList.add('hidden')">✕</button></div>
+    <div class="mb" style="max-height:70vh;overflow:auto;">
+      <div class="tm" style="font-size:11px;margin-bottom:8px;">Lecture seule : rien n'est modifié. Calcul de la comptabilité = somme des <strong>paiements</strong> de ce commercial dont la <strong>date</strong> est dans le mois.</div>
+      <table class="mini-table"><tbody>
+        ${ln('Paiements comptés', pays.length)}
+        ${ln('Total recalculé maintenant', fmt(total))}
+        ${ligne ? ln('Valeur enregistrée dans Auto-salaire', fmt(Number(ligne.collecte||0)), Number(ligne.collecte||0)!==total) : ''}
+        ${ln('Doublons même _offlineId (en trop)', dOff.length ? `${dOff.reduce((a,g)=>a+g.length-1,0)} · ${fmt(surplus(dOff))}` : '0', dOff.length)}
+        ${ln('Doublons probables (même client, date, heure, montant) en trop', dSim.length ? `${dSim.reduce((a,g)=>a+g.length-1,0)} · ${fmt(surplus(dSim))}` : '0', dSim.length)}
+        ${ln('Saisis par une autre personne (saisiParId ≠ commercial)', autresSaisie.length ? `${autresSaisie.length} · ${fmt(autresSaisie.reduce((a,p)=>a+Number(p.montant||0),0))}` : '0')}
+        ${ln('Montants ≤ 0', negatifs.length)}
+        ${ln('Adhésions (adhesionPays) — NON comptées ici', `${adh.length} · ${fmt(totAdh)}`)}
+      </tbody></table>
+      ${tbl('Par type', parChamp('type'))}${tbl('Par source', parChamp('source'))}${tbl('Par origine', parChamp('origine'))}
+      <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="btn btn-ghost btn-sm" onclick="exportDetailCollecte()">⬇ Export CSV (1 ligne par paiement)</button>
+      </div>
+      <div class="tm" style="font-size:11px;margin-top:8px;">Pour comparer : exportez aussi le CSV de TMMB (Recouvrements par date et par commercial) pour le même mois et le même commercial.</div>
+    </div></div>`;
+  mo.classList.remove('hidden');
+};
+window.exportDetailCollecte = function(){
+  const pays = window._detailCollecteRows || [];
+  const cl = new Map((TDB.clients||[]).map(c=>[c._id,c]));
+  const dOff = new Map(); pays.forEach(p=>{ const k=_cleDoublon(p); if(k) dOff.set(k,(dOff.get(k)||0)+1); });
+  const dSim = new Map(); pays.forEach(p=>{ const k=_cleSimilaire(p); dSim.set(k,(dSim.get(k)||0)+1); });
+  const rows = [['Date','Heure','Client','Montant','Type','Source','Origine','Saisi par','Doublon _offlineId','Doublon probable','Id paiement']];
+  pays.forEach(p=>rows.push([p.date||'', p.heure||'', cl.get(p.clientId)?.nom||p.clientId||'', Number(p.montant||0), p.type||'', p.source||'', p.origine||'',
+    p.saisiParNom||p.saisiParId||'', (_cleDoublon(p)&&dOff.get(_cleDoublon(p))>1)?'OUI':'', dSim.get(_cleSimilaire(p))>1?'OUI':'', p._id]));
+  const csv = rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(';')).join('\n');
+  const a = document.createElement('a'); a.href='data:text/csv;charset=utf-8,\uFEFF'+encodeURIComponent(csv);
+  a.download = 'detail_collecte_'+String(window._detailCollecteNom||'').replace(/[^\w-]+/g,'_')+'.csv'; a.click();
+};
+
 /* Importer tous les commerciaux TDB pour le mois sélectionné */
 window.calculerTousSalaires = function(){
   const key = getSalKey();
@@ -2556,6 +2619,7 @@ window.renderSalaires = function(){
         <input type="number" class="sal-input-inline" value="${Number(l.collecte||0)}" min="0"
           onchange="updateSalLigne('${esc(l.id)}','collecte',this.value)"
           oninput="updateSalLigne('${esc(l.id)}','collecte',this.value)">
+        <button class="btn btn-ghost btn-xs no-print" onclick="detailCollecte('${esc(l.id)}')" title="Voir le détail des paiements (lecture seule)">🔍</button>
       </td>
       <td><span class="sal-badge-comm sal-comm-val">${fmt(comm)}</span></td>
       <td>
