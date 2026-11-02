@@ -3086,7 +3086,10 @@ window.renderFichePaie = function(){
     if(_fpCarbuKey !== k){ carbuEl.value = Math.round(dep.carbuVidange); _fpCarbuKey = k; }
   }
   const carbuVidange   = Number(carbuEl?.value||0);
-  const primeRendement = isAdmin ? 0 : commission - salBase - depensesCommercial;
+  // Prime sur rendement ramenée à 0 si négative (décision du 02/11/2026) :
+  // le salaire de base est garanti ; la fiche affiche et imprime 0.
+  const primeRendementBrute = isAdmin ? 0 : commission - salBase - depensesCommercial;
+  const primeRendement = Math.max(0, primeRendementBrute);
   const brutTotal      = salBase + primeRendement + primeMotivation + primeHebdo + prime;
   const cotCNSS        = brutTotal * cnss;
   const cotITS         = brutTotal * its;
@@ -3105,7 +3108,7 @@ window.renderFichePaie = function(){
 
   // [FICHES PAYÉES] Calculs regroupés dans F : affichés ici, et figés tels
   // quels si la fiche est payée (réimpression identique ensuite).
-  const F = { isAdmin, commId, nomComm, poste, numFiche, month, year, salBase, primeRendement,
+  const F = { isAdmin, commId, nomComm, poste, numFiche, month, year, salBase, primeRendement, primeRendementBrute,
     depensesCommercial, primeMotivation, primeHebdo, prime, brutTotal, avance, dettes, caution, epargne,
     manquant, carbuVidange, cnss, its, cotCNSS, cotITS, totalRetenues, netAPayer, collecte, taux,
     dep: { carbuVidange: dep.carbuVidange, autres: dep.autres, detail: dep.detail } };
@@ -3173,7 +3176,7 @@ function _fpGauge(F){
 
 /* Modèle de la fiche (écran = true : avec aides non imprimées). paye = {date, annule} pour une fiche archivée. */
 function _fpHtml(F, screen, paye){
-  const { isAdmin, nomComm, poste, numFiche, month, year, salBase, primeRendement, depensesCommercial,
+  const { isAdmin, nomComm, poste, numFiche, month, year, salBase, primeRendement, primeRendementBrute, depensesCommercial,
     primeMotivation, primeHebdo, brutTotal, avance, dettes, caution, epargne, manquant, carbuVidange,
     cnss, cotCNSS, totalRetenues, netAPayer } = F;
   const dep = F.dep || { carbuVidange: carbuVidange, autres: depensesCommercial, detail: {} };
@@ -3223,10 +3226,11 @@ function _fpHtml(F, screen, paye){
           <td>Prime sur rendement</td>
           <td class="r">${Math.round(primeRendement).toLocaleString('fr-FR')}</td>
         </tr>
+        ${screen && Number(primeRendementBrute) < 0 ? `<tr class="fp-sub no-print"><td colspan="2" style="color:var(--warn,#fb923c);">ℹ️ Prime calculée : −${Math.round(-primeRendementBrute).toLocaleString('fr-FR')} → ramenée à 0 (salaire de base garanti). Non imprimé.</td></tr>` : ''}
         ${/* [DÉTAIL DES DÉPENSES DÉDUITES] une ligne imprimée par nature (prime samedi,
              entraide, réparation…), hors carburant/vidange qui sont en retenue.
              Lignes « dont » : information, déjà comprises dans la prime ci-dessus. */
-          Object.entries((dep && dep.detail) || {})
+          (Number(primeRendementBrute) < 0 ? [] : Object.entries((dep && dep.detail) || {}))
             .filter(([n,m]) => !_isCarbuVidange({nature:n}) && Number(m))
             .sort((a,b) => b[1]-a[1])
             .map(([n,m]) => `<tr class="fp-sub">
@@ -3504,7 +3508,7 @@ window.exportFichePaieCSV = function(){
   const depensesCommercial = dep.autres;            // hors carburant/vidange
   // Même valeur que la case affichée (pré-remplie depuis les dépenses, corrigeable)
   const carbuVidange = Number(document.getElementById('fp-carbu')?.value||0);
-  const primeRendement = isAdmin ? 0 : commission - salBase - depensesCommercial;
+  const primeRendement = isAdmin ? 0 : Math.max(0, commission - salBase - depensesCommercial);   // jamais négative (02/11/2026)
   const brut        = salBase + primeRendement + primeMotivation + primeHebdo + primeTotal;
   const retCNSS     = brut * cnss;
   const retITS      = brut * its;
