@@ -2388,6 +2388,14 @@ function getLignes(){
 }
 
 /* Calcule la collecte d'un commercial depuis Firebase si disponible */
+/* Paiements de source « transfert » : exclus de la collecte d'un commercial,
+   comme dans l'app TMMB (Recouvrements par date et par commercial). Vérifié le
+   02/11/2026 : 862 025 − 4 750 (2 transferts) = 857 275 = total TMMB.
+   L'épargne totale des clients, le bilan et le journal NE sont PAS concernés. */
+function _estTransfert(p){ return String(p?.source||'').trim().toLowerCase() === 'transfert'; }
+function _paiementsCollecte(id, prefix){
+  return TDB.paiements.filter(p => p.commercialId === id && p.date && p.date.startsWith(prefix) && !_estTransfert(p));
+}
 function getCollecteCommercial(nomOuId, year, month){
   // Chercher parmi les commerciaux TDB par nom ou _id
   const comm = TDB.commerciaux.find(c=>
@@ -2396,9 +2404,7 @@ function getCollecteCommercial(nomOuId, year, month){
   );
   if(!comm) return 0;
   const prefix = `${year}-${month}`;
-  return TDB.paiements
-    .filter(p => p.commercialId === comm._id && p.date && p.date.startsWith(prefix))
-    .reduce((a,p) => a + Number(p.montant||0), 0);
+  return _paiementsCollecte(comm._id, prefix).reduce((a,p) => a + Number(p.montant||0), 0);
 }
 
 /* 🔍 Détail de la collecte d'un commercial (LECTURE SEULE, 0 lecture Firestore :
@@ -2410,8 +2416,10 @@ window.detailCollecte = function(id){
   const comm = TDB.commerciaux.find(c=>c._id===id);
   const ligne = (SAL_DATA[key]||[]).find(l=>l.id===id);
   const prefix = `${year}-${month}`;
-  const pays = TDB.paiements.filter(p => p.commercialId === id && p.date && p.date.startsWith(prefix))
+  const tous = TDB.paiements.filter(p => p.commercialId === id && p.date && p.date.startsWith(prefix))
     .sort((a,b)=>(a.date+(a.heure||'')).localeCompare(b.date+(b.heure||'')));
+  const pays = tous.filter(p=>!_estTransfert(p)), transferts = tous.filter(_estTransfert);
+  const totTr = transferts.reduce((a,p)=>a+Number(p.montant||0),0);
   const total = pays.reduce((a,p)=>a+Number(p.montant||0),0);
   const parChamp = f => { const m = new Map(); pays.forEach(p=>{ const k = (p[f]===undefined||p[f]===null||p[f]==='') ? '(vide)' : String(p[f]);
     const o = m.get(k) || {nb:0,total:0}; o.nb++; o.total += Number(p.montant||0); m.set(k,o); }); return [...m.entries()].sort((a,b)=>b[1].total-a[1].total); };
@@ -2425,16 +2433,17 @@ window.detailCollecte = function(id){
   const tbl = (titre, rows) => `<div style="margin-top:12px;font-weight:700;font-size:12px;">${titre}</div>
     <table class="mini-table"><thead><tr><th>Valeur</th><th>Nb</th><th>Montant</th></tr></thead><tbody>${rows.map(([k,o])=>`<tr><td>${esc(k)}</td><td>${o.nb}</td><td>${fmt(o.total)}</td></tr>`).join('')}</tbody></table>`;
   const ln = (lbl,val,warn) => `<tr><td>${lbl}</td><td style="text-align:right;font-weight:700;${warn?'color:var(--red,#ef4444);':''}">${val}</td></tr>`;
-  window._detailCollecteRows = pays;
+  window._detailCollecteRows = tous;
   window._detailCollecteNom = (comm?.nom||comm?.name||id)+'_'+prefix;
   let mo = document.getElementById('modal-detail-collecte');
   if(!mo){ mo = document.createElement('div'); mo.className='mo hidden'; mo.id='modal-detail-collecte'; document.body.appendChild(mo); }
   mo.innerHTML = `<div class="md" style="max-width:720px;"><div class="mh"><div class="md-title">🔍 Détail de la collecte — ${esc(comm?.nom||comm?.name||id)} — ${esc(prefix)}</div>
     <button class="close-btn" onclick="document.getElementById('modal-detail-collecte').classList.add('hidden')">✕</button></div>
     <div class="mb" style="max-height:70vh;overflow:auto;">
-      <div class="tm" style="font-size:11px;margin-bottom:8px;">Lecture seule : rien n'est modifié. Calcul de la comptabilité = somme des <strong>paiements</strong> de ce commercial dont la <strong>date</strong> est dans le mois.</div>
+      <div class="tm" style="font-size:11px;margin-bottom:8px;">Lecture seule : rien n'est modifié. Calcul de la comptabilité = somme des <strong>paiements</strong> de ce commercial dont la <strong>date</strong> est dans le mois, <strong>hors source « transfert »</strong> (comme dans l'app TMMB).</div>
       <table class="mini-table"><tbody>
         ${ln('Paiements comptés', pays.length)}
+        ${ln('Transferts (source « transfert ») — exclus comme dans TMMB', `${transferts.length} · ${fmt(totTr)}`)}
         ${ln('Total recalculé maintenant', fmt(total))}
         ${ligne ? ln('Valeur enregistrée dans Auto-salaire', fmt(Number(ligne.collecte||0)), Number(ligne.collecte||0)!==total) : ''}
         ${ln('Doublons même _offlineId (en trop)', dOff.length ? `${dOff.reduce((a,g)=>a+g.length-1,0)} · ${fmt(surplus(dOff))}` : '0', dOff.length)}
@@ -2456,8 +2465,8 @@ window.exportDetailCollecte = function(){
   const cl = new Map((TDB.clients||[]).map(c=>[c._id,c]));
   const dOff = new Map(); pays.forEach(p=>{ const k=_cleDoublon(p); if(k) dOff.set(k,(dOff.get(k)||0)+1); });
   const dSim = new Map(); pays.forEach(p=>{ const k=_cleSimilaire(p); dSim.set(k,(dSim.get(k)||0)+1); });
-  const rows = [['Date','Heure','Client','Montant','Type','Source','Origine','Saisi par','Doublon _offlineId','Doublon probable','Id paiement']];
-  pays.forEach(p=>rows.push([p.date||'', p.heure||'', cl.get(p.clientId)?.nom||p.clientId||'', Number(p.montant||0), p.type||'', p.source||'', p.origine||'',
+  const rows = [['Date','Heure','Client','Montant','Compté dans la collecte','Type','Source','Origine','Saisi par','Doublon _offlineId','Doublon probable','Id paiement']];
+  pays.forEach(p=>rows.push([p.date||'', p.heure||'', cl.get(p.clientId)?.nom||p.clientId||'', Number(p.montant||0), _estTransfert(p)?'NON (transfert)':'OUI', p.type||'', p.source||'', p.origine||'',
     p.saisiParNom||p.saisiParId||'', (_cleDoublon(p)&&dOff.get(_cleDoublon(p))>1)?'OUI':'', dSim.get(_cleSimilaire(p))>1?'OUI':'', p._id]));
   const csv = rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(';')).join('\n');
   const a = document.createElement('a'); a.href='data:text/csv;charset=utf-8,\uFEFF'+encodeURIComponent(csv);
@@ -3092,7 +3101,7 @@ window.renderFichePaie = function(){
   const numFiche = `FP-${year}${month}-${pers.codeMatricule}`;
 
   // Nb paiements du mois
-  const nbPaie = comm ? TDB.paiements.filter(p=>p.commercialId===commId && p.date && p.date.startsWith(`${year}-${month}`)).length : 0;
+  const nbPaie = comm ? _paiementsCollecte(commId, `${year}-${month}`).length : 0;   // hors transferts, comme TMMB
 
   // [FICHES PAYÉES] Calculs regroupés dans F : affichés ici, et figés tels
   // quels si la fiche est payée (réimpression identique ensuite).
