@@ -3229,11 +3229,12 @@ function _fpHtml(F, screen, paye){
         ${screen && Number(primeRendementBrute) < 0 ? `<tr class="fp-sub no-print"><td colspan="2" style="color:var(--warn,#fb923c);">ℹ️ Prime calculée : −${Math.round(-primeRendementBrute).toLocaleString('fr-FR')} → ramenée à 0 (salaire de base garanti). Non imprimé.</td></tr>` : ''}
         ${/* [DÉTAIL DES DÉPENSES DÉDUITES] une ligne imprimée par nature (prime samedi,
              entraide, réparation…), hors carburant/vidange qui sont en retenue.
-             Lignes « dont » : information, déjà comprises dans la prime ci-dessus. */
-          (Number(primeRendementBrute) < 0 ? [] : Object.entries((dep && dep.detail) || {}))
+             Lignes « dont » : information, déjà comprises dans la prime ci-dessus.
+             Écran uniquement : jamais imprimées (demande du 03/11/2026). */
+          (!screen || Number(primeRendementBrute) < 0 ? [] : Object.entries((dep && dep.detail) || {}))
             .filter(([n,m]) => !_isCarbuVidange({nature:n}) && Number(m))
             .sort((a,b) => b[1]-a[1])
-            .map(([n,m]) => `<tr class="fp-sub">
+            .map(([n,m]) => `<tr class="fp-sub no-print">
           <td>dont dépense déduite : ${esc(n)}</td>
           <td class="r">−${Math.round(m).toLocaleString('fr-FR')}</td>
         </tr>`).join('')}`}
