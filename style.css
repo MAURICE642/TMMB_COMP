@@ -680,3 +680,24 @@ details.coll[open] > .coll-sum::before{transform:rotate(90deg);}
   .kpi-row.kpi-4,.kpi-row.kpi-3,.sal-summary-cards{grid-template-columns:1fr!important;}
   .logo-name{font-size:15px;}
 }
+
+/* ═══════ DOSSIERS DU PERSONNEL ═══════ */
+.pers-thumb{width:34px;height:34px;border-radius:50%;object-fit:cover;background:var(--surface2);display:inline-flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:var(--muted);border:1px solid var(--border);}
+.pers-sec{margin:14px 0 6px;font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--accent);border-bottom:1px solid var(--border);padding-bottom:4px;}
+.pers-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px 12px;}
+.pers-grid .form-group{margin-bottom:0;}
+.pers-photo{width:96px;height:96px;border-radius:10px;object-fit:cover;border:1px solid var(--border);background:var(--surface2);}
+.pers-hist{list-style:none;padding:0;margin:0;font-size:12px;}
+.pers-hist li{padding:6px 0;border-bottom:1px dashed var(--border);}
+.pers-ro{font-size:13px;padding:6px 0;}
+.pers-ro .form-label{margin-bottom:2px;}
+#page-pers-print{display:none;}
+.pers-print{background:#fff;color:#111;font-family:Arial,Helvetica,sans-serif;font-size:12px;padding:12mm 14mm;}
+.pers-print h1{font-size:18px;margin:0 0 4px;} .pers-print h2{font-size:13px;margin:14px 0 6px;border-bottom:1px solid #111;padding-bottom:3px;}
+.pers-print table{width:100%;border-collapse:collapse;} .pers-print td{padding:4px 6px;border-bottom:1px solid #ddd;vertical-align:top;}
+.pers-print td.k{width:38%;color:#444;}
+@media print{
+  body.print-dossier .page:not(#page-pers-print){display:none!important;}
+  body.print-dossier #page-pers-print{display:block!important;}
+  body.print-dossier .mo{display:none!important;}
+}

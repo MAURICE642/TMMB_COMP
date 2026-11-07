@@ -113,6 +113,12 @@
       Autonomie
     </div>
 
+    <div class="nav-section">Ressources humaines</div>
+    <div class="nav-item" id="nav-personnel" onclick="go('personnel')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><circle cx="12" cy="12.5" r="2.2"/><path d="M8.5 17.5a3.5 3.5 0 0 1 7 0"/></svg>
+      Dossiers du personnel
+    </div>
+
     <div class="nav-section">Données TRIOMPHANT</div>
     <div class="nav-item" id="nav-import" onclick="go('import')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/></svg>
@@ -447,6 +453,36 @@
           <div id="lock-list"></div>
         </div>
       </div>
+
+      <!-- ════════ PAGE : DOSSIERS DU PERSONNEL (aucun calcul) ════════ -->
+      <div class="page" id="page-personnel">
+        <div class="sec-hdr">
+          <div class="sec-title">🗂️ Dossiers du personnel</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button class="btn btn-ghost btn-sm no-print" onclick="chargerPersonnel(true)" title="Relire les dossiers depuis Firebase">🔄 Actualiser</button>
+            <button class="btn btn-ghost btn-sm no-print" onclick="exportPersonnelCSV()">⬇ Export CSV</button>
+            <button class="btn btn-primary btn-sm no-print" id="btn-pers-add" onclick="ouvrirDossier(null)">+ Nouveau dossier</button>
+          </div>
+        </div>
+        <div class="alert alert-info">🔐 Données personnelles : lecture par l'administrateur et le comptable, modification par l'administrateur seulement. Un dossier n'est jamais supprimé : une personne qui part passe au statut « Inactif » et ses coordonnées restent conservées.</div>
+        <div class="filters">
+          <input type="text" id="pers-search" class="form-control" placeholder="Nom, matricule, téléphone…" style="font-size:12px;" oninput="renderPersonnel()">
+          <select id="pers-statut" class="form-control" style="font-size:12px;" onchange="renderPersonnel()">
+            <option value="">Tous les statuts</option><option value="actif">Actifs</option><option value="mute">Mutés</option><option value="inactif">Inactifs</option>
+          </select>
+          <select id="pers-agence" class="form-control" style="font-size:12px;" onchange="renderPersonnel()"><option value="">Toutes les agences</option></select>
+        </div>
+        <div class="kpi-row" id="pers-kpi"></div>
+        <div class="alert alert-danger" id="pers-err" style="display:none;"></div>
+        <details class="coll" id="coll-personnel" open>
+          <summary class="coll-sum"><span class="coll-title">👥 Liste du personnel <span class="coll-count" id="pers-count"></span></span><span class="coll-hint">cliquer pour replier / déplier</span></summary>
+          <div class="tw"><table>
+            <thead><tr><th></th><th>Matricule</th><th>Nom et prénoms</th><th>Poste</th><th>Agence</th><th>Téléphone</th><th>Embauche</th><th>Statut</th><th class="no-print">Actions</th></tr></thead>
+            <tbody id="tb-personnel"></tbody>
+          </table></div>
+        </details>
+      </div>
+      <div class="page" id="page-pers-print"></div>
 
       <!-- ════════ PAGE : IMPORT / SYNC ════════ -->
       <div class="page" id="page-import">
@@ -923,6 +959,17 @@
 </div>
 
 <!-- MODAL PIÈCE JOINTE VIEWER -->
+<!-- ════════ FENÊTRE : DOSSIER D'UN MEMBRE DU PERSONNEL ════════ -->
+<div class="mo hidden" id="modal-personnel">
+  <div class="md md-lg">
+    <div class="mh">
+      <div class="md-title" id="pers-modal-title">Dossier</div>
+      <button class="close-btn" onclick="fermerDossier()">✕</button>
+    </div>
+    <div class="mb" id="pers-modal-body"></div>
+  </div>
+</div>
+
 <div class="mo hidden" id="modal-pj-viewer">
   <div class="md">
     <div class="mh">

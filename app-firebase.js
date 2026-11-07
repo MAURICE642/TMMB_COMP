@@ -1146,7 +1146,7 @@ const PAGE_TITLES = {
   resultat:'Compte de Résultat',journaux:'Journal des écritures',import:'Synchronisation',
   salaires:'Auto-Salaire Commerciaux','fiche-paie':'Fiche de Paie','paye-resp':'Payer un responsable',projection:'Projection livraisons',
   comptes:'Gestion des comptes',tresorerie:'Tableau de Trésorerie',periodes:'Verrouillage des périodes',
-  autonomie:'Autonomie de l\'entreprise'
+  autonomie:'Autonomie de l\'entreprise', personnel:'Dossiers du personnel'
 };
 
 window.go = function(pg){
@@ -1187,6 +1187,7 @@ function renderPg(pg){
   else if(pg==='tresorerie') renderTresorerie();
   else if(pg==='periodes') renderPeriodes();
   else if(pg==='autonomie') renderAutonomie();
+  else if(pg==='personnel') renderPersonnel();
 }
 
 /* ═══════════════════════════════════════════════════
@@ -4138,6 +4139,320 @@ window.renderAutonomie = function(){
 
   const footer = document.getElementById('auto-footer-note');
   if(footer) footer.textContent = `Calculé le ${new Date().toLocaleDateString('fr-FR')} — Rythme basé sur ${rythme.curMonth} mois écoulés en ${rythme.year}.`;
+};
+
+
+// ═══════════════════════════════════════════════════
+//  DOSSIERS DU PERSONNEL (aucun calcul comptable)
+//  Collections Firestore (nouvelles) :
+//   - personnel/{id}      : 1 document par personne (+ historique daté, photo réduite)
+//   - personnelDocs/{id}  : 1 document par pièce jointe (contrat, CV…), lu à la demande
+//  Lecture : admin + comptable ; écriture : admin. Aucun dossier n'est supprimé.
+//  Lectures Firestore : uniquement à l'ouverture du menu (1 fois par session) et
+//  à l'ouverture des documents d'une personne.
+// ═══════════════════════════════════════════════════
+let PERSONNEL = null, _persErr = '', _persCur = null, _persDocs = [], _persPhoto = undefined;
+const PERS_STATUTS = { actif:['Actif','tag-green'], mute:['Muté','tag-blue'], inactif:['Inactif','tag-red'] };
+const PERS_DOC_MAX = 700*1024;        // limite d'un document Firestore : 1 Mio (base64 ≈ +33 %)
+const PERS_CHAMPS = [                 // [clé, libellé, type, section, options]
+  ['nom','Nom *','text','id'], ['prenoms','Prénoms','text','id'], ['sexe','Sexe','select','id',['','Masculin','Féminin']],
+  ['dateNaissance','Date de naissance','date','id'], ['lieuNaissance','Lieu de naissance','text','id'],
+  ['telephone','Téléphone *','tel','contact'], ['telephone2','Téléphone 2','tel','contact'], ['email','E-mail','email','contact'], ['adresse','Adresse / quartier','text','contact'],
+  ['poste','Poste *','text','poste'], ['agenceId','Agence','agence','poste'], ['dateEmbauche','Date d\'embauche','date','poste'],
+  ['typeContrat','Type de contrat','select','poste',['','CDI','CDD','Stage','Prestataire','Essai','Autre']], ['salaireBase','Salaire de base (FCFA)','number','poste'],
+  ['commercialId','Compte TMMB lié (facultatif)','commercial','poste'],
+  ['pieceType','Pièce d\'identité','select','piece',['','CNI','CIP','Passeport','Carte biométrique','Permis','Autre']], ['pieceNumero','N° de pièce','text','piece'],
+  ['cnss','N° CNSS','text','piece'], ['urgenceNom','Personne à prévenir','text','piece'], ['urgenceLien','Lien (conjoint, parent…)','text','piece'], ['urgenceTel','Téléphone urgence','tel','piece']
+];
+const PERS_SECTIONS = { id:'Identité', contact:'Coordonnées', poste:'Poste et carrière', piece:'Pièces et urgence' };
+const _persAgence = id => { const a = TDB.agences.find(x=>x._id===id); return a ? (a.nom||a.name||id) : ((PERSONNEL||[]).find(p=>p.agenceId===id)?.agenceNom || id || ''); };
+const _persComm = id => { const c = TDB.commerciaux.find(x=>x._id===id); return c ? (c.nom||c.name||id) : (id||''); };
+const _persNom = d => [d.nom, d.prenoms].filter(Boolean).join(' ');
+const _persIsAdmin = () => window._userRole === 'admin';
+function _persDate(iso){ return iso ? _frDate(iso) : '—'; }
+
+window.chargerPersonnel = async function(force){
+  if(PERSONNEL && !force) return renderPersonnel();
+  if(!db_fs){ _persErr = 'Non connecté à Firebase.'; PERSONNEL = []; return renderPersonnel(); }
+  try{
+    const snap = await getDocs(collection(db_fs,'personnel'));
+    PERSONNEL = snap.docs.map(d=>({_id:d.id, ...d.data()}));
+    _persErr = '';
+  }catch(e){
+    PERSONNEL = PERSONNEL || [];
+    _persErr = e?.code==='permission-denied'
+      ? '⛔ Lecture refusée par les règles Firestore : ajoutez le bloc « personnel » dans vos règles (voir les instructions de mise en place).'
+      : 'Erreur de lecture : '+(e?.message||e);
+  }
+  renderPersonnel();
+};
+
+window.renderPersonnel = function(){
+  const tb = document.getElementById('tb-personnel'); if(!tb) return;
+  const add = document.getElementById('btn-pers-add'); if(add) add.style.display = _persIsAdmin() ? '' : 'none';
+  if(PERSONNEL === null){ tb.innerHTML = '<tr><td colspan="9" class="tm">Chargement…</td></tr>'; chargerPersonnel(); return; }
+  const err = document.getElementById('pers-err'); err.style.display = _persErr ? '' : 'none'; err.textContent = _persErr;
+  const selAg = document.getElementById('pers-agence'), agV = selAg.value;
+  selAg.innerHTML = '<option value="">Toutes les agences</option>' + TDB.agences.map(a=>`<option value="${esc(a._id)}">${esc(a.nom||a.name||a._id)}</option>`).join('');
+  selAg.value = agV;
+  const q = (document.getElementById('pers-search').value||'').trim().toLowerCase();
+  const st = document.getElementById('pers-statut').value;
+  const all = PERSONNEL;
+  const k = s => all.filter(p=>(p.statut||'actif')===s).length;
+  document.getElementById('pers-kpi').innerHTML = [['Total',all.length,'kc-blue'],['Actifs',k('actif'),'kc-green'],['Mutés',k('mute'),'kc-purple'],['Inactifs',k('inactif'),'kc-red']]
+    .map(([l,v,c])=>`<div class="kpi-card ${c}"><div class="kpi-lbl">${l}</div><div class="kpi-val">${v}</div></div>`).join('');
+  const rows = all.filter(p => (!st || (p.statut||'actif')===st) && (!agV || p.agenceId===agV)
+      && (!q || [p.matricule,p.nom,p.prenoms,p.telephone,p.telephone2,p.poste,p.email].join(' ').toLowerCase().includes(q)))
+    .sort((a,b)=>_persNom(a).localeCompare(_persNom(b),'fr'));
+  document.getElementById('pers-count').textContent = `(${rows.length})`;
+  tb.innerHTML = rows.length ? rows.map(p=>{ const [lib,cls] = PERS_STATUTS[p.statut||'actif']||PERS_STATUTS.actif;
+    const ini = esc(((p.nom||'?')[0]+(p.prenoms||'')[0]||'').toUpperCase());
+    return `<tr><td>${p.photo?`<img class="pers-thumb" src="${esc(p.photo)}" alt="">`:`<span class="pers-thumb">${ini}</span>`}</td>
+      <td>${esc(p.matricule||'')}</td><td><strong>${esc(_persNom(p))}</strong>${p.commercialId?' <span class="tm" style="font-size:10px;" title="Relié à un compte TMMB">🔗 TMMB</span>':''}</td>
+      <td>${esc(p.poste||'')}</td><td>${esc(_persAgence(p.agenceId))}</td><td>${esc(p.telephone||'')}</td><td>${_persDate(p.dateEmbauche)}</td>
+      <td><span class="tag ${cls}">${lib}</span></td>
+      <td class="no-print"><button class="btn btn-ghost btn-xs" onclick="voirDossier('${esc(p._id)}')">👁 Voir</button>${_persIsAdmin()?` <button class="btn btn-ghost btn-xs" onclick="ouvrirDossier('${esc(p._id)}')">✏️</button>`:''}</td></tr>`; }).join('')
+    : `<tr><td colspan="9" class="tm">${all.length?'Aucun dossier ne correspond aux filtres.':'Aucun dossier pour le moment.'+(_persIsAdmin()?' Cliquez sur « + Nouveau dossier ».':'')}</td></tr>`;
+};
+
+function _persChamp([k,lbl,type,,opts], d){
+  const v = d[k] ?? '';
+  let input;
+  if(type==='select') input = `<select class="form-control" id="pf-${k}">${opts.map(o=>`<option value="${esc(o)}"${o===v?' selected':''}>${esc(o||'—')}</option>`).join('')}</select>`;
+  else if(type==='agence') input = `<select class="form-control" id="pf-${k}"><option value="">—</option>${TDB.agences.map(a=>`<option value="${esc(a._id)}"${a._id===v?' selected':''}>${esc(a.nom||a.name||a._id)}</option>`).join('')}${v && !TDB.agences.some(a=>a._id===v) ? `<option value="${esc(v)}" selected>${esc(d.agenceNom||v)} (n'existe plus dans TMMB)</option>` : ''}</select>`;
+  else if(type==='commercial') input = `<div style="display:flex;gap:6px;"><select class="form-control" id="pf-${k}"><option value="">— Aucun —</option>${[...TDB.commerciaux].sort((a,b)=>String(a.nom||a.name||'').localeCompare(String(b.nom||b.name||''),'fr')).map(c=>`<option value="${esc(c._id)}"${c._id===v?' selected':''}>${esc(c.nom||c.name||c._id)}</option>`).join('')}${v && !TDB.commerciaux.some(c=>c._id===v) ? `<option value="${esc(v)}" selected>${esc(v)} (compte introuvable)</option>` : ''}</select><button type="button" class="btn btn-ghost btn-xs" onclick="preRemplirTMMB()" title="Recopier nom, téléphone, e-mail et agence depuis TMMB (champs vides seulement)">⤵ Pré-remplir</button></div>`;
+  else input = `<input class="form-control" type="${type}" id="pf-${k}" value="${esc(v)}"${type==='number'?' min="0"':''}>`;
+  return `<div class="form-group"><div class="form-label">${lbl}</div>${input}</div>`;
+}
+
+window.ouvrirDossier = function(id){
+  if(!_persIsAdmin()){ notify('Réservé à l\'administrateur','err'); return; }
+  const d = id ? (PERSONNEL||[]).find(p=>p._id===id) : null;
+  if(id && !d) return;
+  _persCur = d; _persPhoto = undefined;
+  const x = d || { statut:'actif' };
+  document.getElementById('pers-modal-title').textContent = d ? `✏️ Dossier — ${_persNom(d)}` : '➕ Nouveau dossier';
+  const sec = s => `<div class="pers-sec">${PERS_SECTIONS[s]}</div><div class="pers-grid">${PERS_CHAMPS.filter(c=>c[3]===s).map(c=>_persChamp(c,x)).join('')}</div>`;
+  document.getElementById('pers-modal-body').innerHTML = `
+    <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;">
+      <img id="pf-photo-img" class="pers-photo" src="${esc(x.photo||'')}" style="${x.photo?'':'display:none;'}" alt="Photo">
+      <div><div class="form-label">Photo (réduite automatiquement)</div>
+        <input type="file" accept="image/*" id="pf-photo" onchange="persPhotoChoisie(this)">
+        ${x.photo?'<button type="button" class="btn btn-ghost btn-xs" onclick="persPhotoRetirer()">Retirer la photo</button>':''}</div>
+      <div style="margin-left:auto;"><div class="form-label">Matricule</div><input class="form-control" id="pf-matricule" value="${esc(x.matricule||_persMatriculeSuivant())}" style="width:140px;"></div>
+    </div>
+    ${sec('id')}${sec('contact')}${sec('poste')}${sec('piece')}
+    <div class="pers-sec">Statut</div>
+    <div class="pers-grid">
+      <div class="form-group"><div class="form-label">Statut</div><select class="form-control" id="pf-statut" onchange="persStatutChange()">${Object.entries(PERS_STATUTS).map(([k,[l]])=>`<option value="${k}"${(x.statut||'actif')===k?' selected':''}>${l}</option>`).join('')}</select></div>
+      <div class="form-group" id="pf-sortie-g"><div class="form-label">Date de sortie</div><input type="date" class="form-control" id="pf-dateSortie" value="${esc(x.dateSortie||'')}"></div>
+      <div class="form-group" id="pf-motif-g"><div class="form-label">Motif de sortie</div><select class="form-control" id="pf-motifSortie">${['','Démission','Licenciement','Fin de contrat','Abandon de poste','Retraite','Décès','Autre'].map(o=>`<option${o===(x.motifSortie||'')?' selected':''}>${o}</option>`).join('')}</select></div>
+    </div>
+    ${d?`<div class="pers-sec">Changement (si poste, agence ou statut modifié)</div><div class="pers-grid">
+      <div class="form-group"><div class="form-label">Date d'effet</div><input type="date" class="form-control" id="pf-dateEffet" value="${_todayIso()}"></div>
+      <div class="form-group" style="grid-column:span 2;"><div class="form-label">Motif / commentaire (gardé dans l'historique)</div><input class="form-control" id="pf-commentaire" placeholder="Ex. : mutation à la demande de la direction"></div></div>`:''}
+    <div class="form-group" style="margin-top:10px;"><div class="form-label">Observations</div><textarea class="form-control" id="pf-observations" rows="2">${esc(x.observations||'')}</textarea></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px;">
+      <button class="btn btn-ghost" onclick="fermerDossier()">Annuler</button>
+      <button class="btn btn-primary" id="pf-save" onclick="enregistrerDossier()">💾 Enregistrer</button>
+    </div>`;
+  persStatutChange();
+  document.getElementById('modal-personnel').classList.remove('hidden');
+};
+window.fermerDossier = function(){ document.getElementById('modal-personnel').classList.add('hidden'); };
+window.persStatutChange = function(){
+  const ina = document.getElementById('pf-statut')?.value === 'inactif';
+  ['pf-sortie-g','pf-motif-g'].forEach(i=>{ const e=document.getElementById(i); if(e) e.style.display = ina ? '' : 'none'; });
+};
+function _persMatriculeSuivant(){
+  const n = Math.max(0, ...(PERSONNEL||[]).map(p=>Number(String(p.matricule||'').match(/(\d+)\s*$/)?.[1]||0)));
+  return 'TMMB-' + String(n+1).padStart(4,'0');
+}
+window.preRemplirTMMB = function(){
+  const c = TDB.commerciaux.find(x=>x._id===document.getElementById('pf-commercialId').value);
+  if(!c){ notify('Choisissez d\'abord un compte TMMB','err'); return; }
+  const nomComplet = String(c.nom||c.name||'').trim();
+  const set = (k,v) => { const e=document.getElementById('pf-'+k); if(e && !e.value && v) e.value = v; };
+  if(!document.getElementById('pf-nom').value && nomComplet){ const [n,...pr] = nomComplet.split(/\s+/); set('nom', n); set('prenoms', pr.join(' ')); }
+  set('telephone', c.telephone||c.tel||c.phone); set('email', c.email); set('agenceId', c.agenceId);
+  if(c.role) set('poste', c.role==='commercial' ? 'Agent Commercial' : String(c.role));
+  notify('Champs vides pré-remplis depuis TMMB (à vérifier)');
+};
+/* Photo : réduite à 400 px max, JPEG ≈ 30-60 Ko, pour rester loin de la limite de 1 Mio. */
+function _reduireImage(file, max, q){
+  return new Promise((ok, ko)=>{
+    const rd = new FileReader();
+    rd.onload = e => { const img = new Image(); img.onload = () => {
+      const r = Math.min(1, max/Math.max(img.width,img.height)); const c = document.createElement('canvas');
+      c.width = Math.round(img.width*r); c.height = Math.round(img.height*r);
+      c.getContext('2d').drawImage(img,0,0,c.width,c.height); ok(c.toDataURL('image/jpeg', q)); };
+      img.onerror = () => ko(new Error('Image illisible')); img.src = e.target.result; };
+    rd.onerror = () => ko(rd.error); rd.readAsDataURL(file);
+  });
+}
+window.persPhotoChoisie = async function(inp){
+  const f = inp.files[0]; if(!f) return;
+  try{ _persPhoto = await _reduireImage(f, 400, 0.8); const i = document.getElementById('pf-photo-img'); i.src = _persPhoto; i.style.display=''; }
+  catch(e){ notify('Photo illisible : '+e.message,'err'); }
+};
+window.persPhotoRetirer = function(){ _persPhoto = null; const i=document.getElementById('pf-photo-img'); i.src=''; i.style.display='none'; };
+
+window.enregistrerDossier = async function(){
+  if(!_persIsAdmin()){ notify('Réservé à l\'administrateur','err'); return; }
+  const val = k => (document.getElementById('pf-'+k)?.value ?? '').trim();
+  const data = {};
+  PERS_CHAMPS.forEach(([k,,type])=>{ const v = val(k); data[k] = type==='number' ? (v===''?null:Number(v)) : v; });
+  data.matricule = val('matricule'); data.statut = val('statut') || 'actif'; data.observations = val('observations');
+  data.dateSortie = data.statut==='inactif' ? val('dateSortie') : ''; data.motifSortie = data.statut==='inactif' ? val('motifSortie') : '';
+  data.agenceNom = data.agenceId ? _persAgence(data.agenceId) : '';
+  if(!data.nom || !data.telephone || !data.poste){ notify('Nom, téléphone et poste sont obligatoires','err'); return; }
+  if(data.salaireBase !== null && !(data.salaireBase >= 0)){ notify('Salaire de base invalide','err'); return; }
+  if(data.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email)){ notify('E-mail invalide','err'); return; }
+  const dbl = (PERSONNEL||[]).find(p=>p._id!==_persCur?._id && ((data.matricule && p.matricule===data.matricule) || (data.pieceNumero && p.pieceNumero===data.pieceNumero)));
+  if(dbl && !confirm(`⚠️ Un autre dossier a le même matricule ou le même n° de pièce : « ${_persNom(dbl)} ». Enregistrer quand même ?`)) return;
+  if(_persPhoto !== undefined) data.photo = _persPhoto || '';
+  const u = getCurrentUser() || {}; const qui = u.name || u.email || '?';
+  const now = new Date().toISOString();
+  const old = _persCur;
+  const hist = [...(old?.historique||[])];
+  if(!old){
+    hist.push({ date: data.dateEmbauche || _todayIso(), type:'creation', detail:`Dossier créé — ${data.poste}${data.agenceNom?' · '+data.agenceNom:''}`, par: qui, le: now });
+  }else{
+    const eff = val('dateEffet') || _todayIso(), com = val('commentaire');
+    const ch = [];
+    if((old.agenceId||'') !== data.agenceId) ch.push(['mutation', `Agence : ${_persAgence(old.agenceId)||'—'} → ${data.agenceNom||'—'}`]);
+    if((old.poste||'') !== data.poste) ch.push(['poste', `Poste : ${old.poste||'—'} → ${data.poste}`]);
+    if((old.statut||'actif') !== data.statut) ch.push(['statut', `Statut : ${PERS_STATUTS[old.statut||'actif'][0]} → ${PERS_STATUTS[data.statut][0]}${data.statut==='inactif'&&data.motifSortie?' ('+data.motifSortie+')':''}`]);
+    if(old.salaireBase !== data.salaireBase && !(old.salaireBase==null && data.salaireBase==null)) ch.push(['salaire', `Salaire de base : ${old.salaireBase==null?'—':fmt(old.salaireBase)} → ${data.salaireBase==null?'—':fmt(data.salaireBase)}`]);
+    ch.forEach(([type,detail])=>hist.push({ date: eff, type, detail: detail + (com?' — '+com:''), par: qui, le: now }));
+    if(!ch.length && com) hist.push({ date: eff, type:'note', detail: com, par: qui, le: now });
+  }
+  data.historique = hist;
+  data.majLe = now; data.majParNom = qui; data._ts = serverTimestamp();
+  if(!old){ data.creeLe = now; data.creeParNom = qui; data.creeParId = u.id || ''; }
+  const btn = document.getElementById('pf-save'); btn.disabled = true;
+  try{
+    let id = old?._id;
+    if(old) await setDoc(doc(db_fs,'personnel',id), data, { merge:true });
+    else { const ref = await addDoc(collection(db_fs,'personnel'), data); id = ref.id; }
+    const loc = { ...(old||{}), ...data, _id:id, _ts:null };
+    if(old) PERSONNEL[PERSONNEL.findIndex(p=>p._id===id)] = loc; else PERSONNEL.push(loc);
+    fermerDossier(); renderPersonnel();
+    notify(`✅ Dossier de ${_persNom(data)} enregistré`);
+  }catch(e){
+    notify(e?.code==='permission-denied' ? '⛔ Enregistrement refusé par les règles Firestore (administrateur requis)' : 'Erreur : '+(e?.message||e), 'err');
+  }finally{ btn.disabled = false; }
+};
+
+const _ro = (l,v) => `<div class="pers-ro"><div class="form-label">${l}</div>${v ? esc(v) : '<span class="tm">—</span>'}</div>`;
+window.voirDossier = async function(id){
+  const d = (PERSONNEL||[]).find(p=>p._id===id); if(!d) return;
+  _persCur = d;
+  const [lib,cls] = PERS_STATUTS[d.statut||'actif']||PERS_STATUTS.actif;
+  const vue = c => { const [k,l,t] = c; let v = d[k];
+    if(t==='agence') v = _persAgence(v); else if(t==='commercial') v = v ? _persComm(v) : ''; else if(t==='date') v = v ? _frDate(v) : ''; else if(t==='number') v = v==null||v==='' ? '' : fmt(v);
+    return _ro(l.replace(' *',''), v); };
+  const sec = s => `<div class="pers-sec">${PERS_SECTIONS[s]}</div><div class="pers-grid">${PERS_CHAMPS.filter(c=>c[3]===s).map(vue).join('')}</div>`;
+  document.getElementById('pers-modal-title').textContent = `🗂️ ${_persNom(d)}`;
+  document.getElementById('pers-modal-body').innerHTML = `
+    <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;">
+      ${d.photo?`<img class="pers-photo" src="${esc(d.photo)}" alt="Photo">`:''}
+      <div><div style="font-size:18px;font-weight:700;">${esc(_persNom(d))}</div>
+        <div class="tm">${esc(d.matricule||'')} · ${esc(d.poste||'')}${d.agenceId?' · '+esc(_persAgence(d.agenceId)):''}</div>
+        <span class="tag ${cls}" style="margin-top:6px;display:inline-block;">${lib}</span>${d.statut==='inactif'&&d.dateSortie?` <span class="tm">depuis le ${_frDate(d.dateSortie)}${d.motifSortie?' — '+esc(d.motifSortie):''}</span>`:''}</div>
+      <div style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap;">
+        <button class="btn btn-ghost btn-sm" onclick="imprimerDossier('${esc(id)}')">🖨️ Imprimer</button>
+        ${_persIsAdmin()?`<button class="btn btn-primary btn-sm" onclick="ouvrirDossier('${esc(id)}')">✏️ Modifier</button>`:''}</div>
+    </div>
+    ${sec('id')}${sec('contact')}${sec('poste')}${sec('piece')}
+    ${d.observations?`<div class="pers-sec">Observations</div><div class="pers-ro">${esc(d.observations)}</div>`:''}
+    <div class="pers-sec">Historique</div>
+    <ul class="pers-hist">${[...(d.historique||[])].reverse().map(h=>`<li><strong>${_persDate(h.date)}</strong> — ${esc(h.detail)} <span class="tm" style="font-size:10px;">(par ${esc(h.par||'?')})</span></li>`).join('') || '<li class="tm">Aucun événement.</li>'}</ul>
+    <div class="pers-sec">Documents (contrat, CV, pièce scannée…)</div>
+    <div id="pers-docs" class="tm">Chargement…</div>
+    ${_persIsAdmin()?`<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;">
+      <input class="form-control" id="pd-type" placeholder="Type (ex. : Contrat)" style="width:170px;">
+      <input type="file" id="pd-file" accept="image/*,application/pdf">
+      <button class="btn btn-ghost btn-sm" onclick="ajouterDocPersonnel('${esc(id)}')">⬆ Ajouter</button>
+      <span class="tm" style="font-size:11px;">PDF ≤ 700 Ko ; les photos sont réduites automatiquement.</span></div>`:''}
+    <div class="tm" style="font-size:10px;margin-top:12px;">Créé le ${d.creeLe?new Date(d.creeLe).toLocaleString('fr-FR'):'—'} par ${esc(d.creeParNom||'?')} · modifié le ${d.majLe?new Date(d.majLe).toLocaleString('fr-FR'):'—'} par ${esc(d.majParNom||'?')}</div>`;
+  document.getElementById('modal-personnel').classList.remove('hidden');
+  _chargerDocsPersonnel(id);
+};
+async function _chargerDocsPersonnel(id){
+  const box = () => document.getElementById('pers-docs');
+  try{
+    const snap = await getDocs(query(collection(db_fs,'personnelDocs'), where('personnelId','==',id)));
+    _persDocs = snap.docs.map(x=>({_id:x.id, ...x.data()})).sort((a,b)=>String(b.ajouteLe||'').localeCompare(String(a.ajouteLe||'')));
+    if(_persCur?._id !== id || !box()) return;
+    box().innerHTML = _persDocs.length ? `<table class="mini-table"><tbody>${_persDocs.map(x=>`<tr><td>${x.mime==='application/pdf'?'📄':'🖼️'} ${esc(x.typeDoc||'Document')}</td><td>${esc(x.nom||'')}</td><td class="tm">${x.ajouteLe?new Date(x.ajouteLe).toLocaleDateString('fr-FR'):''}</td>
+      <td style="white-space:nowrap;"><button class="btn btn-ghost btn-xs" onclick="ouvrirDocPersonnel('${esc(x._id)}')">Ouvrir</button>${_persIsAdmin()?` <button class="btn btn-danger btn-xs" onclick="supprimerDocPersonnel('${esc(x._id)}')" title="Supprimer ce document">🗑</button>`:''}</td></tr>`).join('')}</tbody></table>`
+      : '<span class="tm">Aucun document.</span>';
+  }catch(e){ if(box()) box().innerHTML = `<span style="color:var(--red);">${e?.code==='permission-denied'?'⛔ Lecture refusée : ajoutez le bloc « personnelDocs » dans vos règles.':'Erreur : '+esc(e?.message||e)}</span>`; }
+}
+window.ouvrirDocPersonnel = function(docId){
+  const x = _persDocs.find(d=>d._id===docId); if(!x) return;
+  const w = window.open(); if(!w){ notify('Fenêtre bloquée par le navigateur','err'); return; }
+  w.document.title = x.nom || 'Document';
+  w.document.body.style.margin = '0';
+  w.document.body.innerHTML = x.mime==='application/pdf'
+    ? `<iframe src="${x.data}" style="border:0;width:100vw;height:100vh;"></iframe>` : `<img src="${x.data}" style="max-width:100%;">`;
+};
+window.ajouterDocPersonnel = async function(id){
+  if(!_persIsAdmin()) return;
+  const f = document.getElementById('pd-file').files[0];
+  if(!f){ notify('Choisissez un fichier','err'); return; }
+  let data, mime = f.type;
+  try{
+    if(f.type.startsWith('image/')){ data = await _reduireImage(f, 1600, 0.75); mime = 'image/jpeg'; }
+    else if(f.type === 'application/pdf'){
+      if(f.size > PERS_DOC_MAX){ notify('PDF trop lourd (max 700 Ko). Compressez-le ou photographiez les pages.','err'); return; }
+      data = await new Promise((ok,ko)=>{ const r=new FileReader(); r.onload=()=>ok(r.result); r.onerror=()=>ko(r.error); r.readAsDataURL(f); });
+    } else { notify('Format accepté : image ou PDF','err'); return; }
+    if(data.length > 950000){ notify('Fichier trop lourd après conversion','err'); return; }
+    const u = getCurrentUser() || {};
+    await addDoc(collection(db_fs,'personnelDocs'), { personnelId:id, typeDoc:(document.getElementById('pd-type').value||'').trim() || 'Document',
+      nom:f.name, mime, taille:data.length, data, ajouteLe:new Date().toISOString(), ajouteParNom:u.name||u.email||'?', _ts:serverTimestamp() });
+    notify('✅ Document ajouté'); document.getElementById('pd-file').value=''; document.getElementById('pd-type').value='';
+    _chargerDocsPersonnel(id);
+  }catch(e){ notify(e?.code==='permission-denied' ? '⛔ Ajout refusé par les règles Firestore' : 'Erreur : '+(e?.message||e), 'err'); }
+};
+window.supprimerDocPersonnel = async function(docId){
+  if(!_persIsAdmin()) return;
+  const x = _persDocs.find(d=>d._id===docId); if(!x) return;
+  if(!confirm(`Supprimer définitivement le document « ${x.typeDoc||''} — ${x.nom||''} » ?\n\nLe dossier de la personne n'est pas touché.`)) return;
+  try{ await deleteDoc(doc(db_fs,'personnelDocs',docId)); notify('Document supprimé'); _chargerDocsPersonnel(x.personnelId); }
+  catch(e){ notify(e?.code==='permission-denied' ? '⛔ Suppression refusée par les règles Firestore' : 'Erreur : '+(e?.message||e), 'err'); }
+};
+
+window.imprimerDossier = function(id){
+  const d = (PERSONNEL||[]).find(p=>p._id===id); if(!d) return;
+  const ligne = c => { const [k,l,t] = c; let v = d[k];
+    if(t==='agence') v = _persAgence(v); else if(t==='commercial') v = v ? _persComm(v) : ''; else if(t==='date') v = v ? _frDate(v) : ''; else if(t==='number') v = v==null||v==='' ? '' : fmt(v);
+    return `<tr><td class="k">${esc(l.replace(' *',''))}</td><td>${esc(v||'—')}</td></tr>`; };
+  const sec = s => `<h2>${PERS_SECTIONS[s]}</h2><table>${PERS_CHAMPS.filter(c=>c[3]===s).map(ligne).join('')}</table>`;
+  const el = document.getElementById('page-pers-print');
+  el.innerHTML = `<div class="pers-print">
+    <div style="display:flex;gap:14px;align-items:center;">${d.photo?`<img src="${esc(d.photo)}" style="width:90px;height:90px;object-fit:cover;border:1px solid #999;">`:''}
+      <div><div style="font-size:11px;color:#444;">TRIOMPHANT MMB SERVICE — Dossier du personnel</div><h1>${esc(_persNom(d))}</h1>
+      <div>${esc(d.matricule||'')} · ${esc(d.poste||'')} · Statut : ${PERS_STATUTS[d.statut||'actif'][0]}${d.statut==='inactif'&&d.dateSortie?' depuis le '+_frDate(d.dateSortie)+(d.motifSortie?' ('+esc(d.motifSortie)+')':''):''}</div></div></div>
+    ${sec('id')}${sec('contact')}${sec('poste')}${sec('piece')}
+    ${d.observations?`<h2>Observations</h2><div>${esc(d.observations)}</div>`:''}
+    <h2>Historique</h2><table>${(d.historique||[]).map(h=>`<tr><td class="k">${_persDate(h.date)}</td><td>${esc(h.detail)}</td></tr>`).join('')||'<tr><td>—</td></tr>'}</table>
+    <div style="margin-top:14px;font-size:10px;color:#666;">Imprimé le ${new Date().toLocaleString('fr-FR')} — document confidentiel</div></div>`;
+  document.body.classList.add('print-dossier');
+  window.print();
+  setTimeout(()=>{ document.body.classList.remove('print-dossier'); el.innerHTML=''; }, 1000);
+};
+
+window.exportPersonnelCSV = function(){
+  if(!PERSONNEL?.length){ notify('Aucun dossier à exporter','err'); return; }
+  const cols = [['matricule','Matricule'], ...PERS_CHAMPS.map(c=>[c[0], c[1].replace(' *','')]), ['statut','Statut'], ['dateSortie','Date de sortie'], ['motifSortie','Motif de sortie'], ['observations','Observations']];
+  const v = (p,k) => k==='agenceId' ? _persAgence(p[k]) : k==='commercialId' ? (p[k]?_persComm(p[k]):'') : k==='statut' ? PERS_STATUTS[p.statut||'actif'][0] : (p[k] ?? '');
+  const rows = [cols.map(c=>c[1]), ...PERSONNEL.map(p=>cols.map(([k])=>v(p,k)))];
+  const csv = rows.map(r=>r.map(x=>`"${String(x).replace(/"/g,'""')}"`).join(';')).join('\n');
+  const a = document.createElement('a'); a.href = 'data:text/csv;charset=utf-8,﻿'+encodeURIComponent(csv);
+  a.download = `personnel_${_todayIso()}.csv`; a.click();
 };
 
 // ═══════════════════════════════════════════════════
